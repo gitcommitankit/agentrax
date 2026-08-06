@@ -175,12 +175,12 @@ var _ = Describe("AgentDeployment Controller", func() {
 			// (called on the reconciler goroutine) can pass its observation to the
 			// test goroutine without a data race on plain booleans.
 			resultCh := make(chan bool, 1)
-			testReconciler.Deregister = func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
+			testReconciler.SetDeregister(func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
 				err := k8sClient.Get(hctx, key, &corev1.Service{})
 				resultCh <- (err == nil)
 				return nil
-			}
-			DeferCleanup(func() { testReconciler.Deregister = nil })
+			})
+			DeferCleanup(func() { testReconciler.SetDeregister(nil) })
 
 			// Delete the object — the reconciler must call Deregister, then remove the finalizer.
 			Expect(k8sClient.Delete(ctx, ad)).To(Succeed())
@@ -229,7 +229,7 @@ var _ = Describe("AgentDeployment Controller", func() {
 			}, testTimeout, testInterval).Should(Succeed(), "Deployment should be created")
 
 			Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))
-			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:latest"))
+			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(testNginxImage))
 			Expect(dep.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort).To(Equal(int32(9090)))
 		})
 

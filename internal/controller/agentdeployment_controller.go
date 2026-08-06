@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,10 +50,23 @@ type AgentDeploymentReconciler struct {
 	// whether ServiceMonitor reconciliation is attempted at all.
 	hasServiceMonitorCRD bool
 
+	// deregisterMu guards the Deregister field so test goroutines can safely
+	// inject and clear the hook while the reconciler goroutine reads it.
+	deregisterMu sync.Mutex
+
 	// Deregister is an optional hook called during deletion cleanup before the
 	// finalizer is removed. Phase 5 will set this to a real MCP deregistration
 	// function. In tests it can be used to assert ordering invariants.
+	// Always access through SetDeregister / the mutex-protected load in runDeletionCleanup.
 	Deregister func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+}
+
+// SetDeregister safely replaces the Deregister hook under the mutex.
+// Use this instead of direct field assignment to avoid data races.
+func (r *AgentDeploymentReconciler) SetDeregister(fn func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error) {
+	r.deregisterMu.Lock()
+	defer r.deregisterMu.Unlock()
+	r.Deregister = fn
 }
 
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -136,8 +150,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // Phase 5 will set Deregister to the real MCP deregistration implementation.
 func (r *AgentDeploymentReconciler) runDeletionCleanup(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 	logger := log.FromContext(ctx)
-	if r.Deregister != nil {
-		if err := r.Deregister(ctx, ad); err != nil {
+	// Load the hook under the mutex so test goroutines can safely inject/clear it
+	// without a data race against this reconciler goroutine.
+	r.deregisterMu.Lock()
+	deregister := r.Deregister
+	r.deregisterMu.Unlock()
+
+	if deregister != nil {
+		if err := deregister(ctx, ad); err != nil {
 			return fmt.Errorf("deregistering agent: %w", err)
 		}
 	}
@@ -281,7 +301,7 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		RemoveCondition(latest, agentraxv1alpha1.ConditionImagePullFailed)
 		if dep.Status.ReadyReplicas > 0 {
 			latest.Status.Phase = agentraxv1alpha1.PhaseRunning
-			latest.Status.StableVersion = ad.Spec.Image
+			latest.Status.StableVersion = latest.Spec.Image
 			SetCondition(latest, agentraxv1alpha1.ConditionReady, metav1.ConditionTrue, "DeploymentReady", "Deployment is ready")
 			SetCondition(latest, agentraxv1alpha1.ConditionReconciled, metav1.ConditionTrue, "ReconcileSuccess", "Latest generation reconciled")
 		} else {
