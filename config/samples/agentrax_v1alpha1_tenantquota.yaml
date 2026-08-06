@@ -1,0 +1,10 @@
+apiVersion: agentrax.io/v1alpha1
+kind: TenantQuota
+metadata:
+  name: team-search
+  namespace: default
+spec:
+  maxAgents: 6
+  maxGPUs: 4
+  maxTotalReplicas: 12
+  maxReplicasPerAgent: 6

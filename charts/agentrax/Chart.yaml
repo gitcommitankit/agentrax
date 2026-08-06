@@ -1,0 +1,29 @@
+apiVersion: v2
+name: agentrax
+description: >
+  A Kubernetes operator for declarative, multi-tenant AI/agent workload management.
+  Provides lifecycle management, metrics-driven autoscaling, canary rollout with
+  auto-rollback, quota enforcement, and MCP-based service discovery.
+
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - kubernetes
+  - operator
+  - ai
+  - llm
+  - agent
+  - autoscaling
+  - canary
+  - mcp
+
+home: https://github.com/gitcommitankit/agentrax
+sources:
+  - https://github.com/gitcommitankit/agentrax
+
+maintainers:
+  - name: gitcommitankit
+
+dependencies: []

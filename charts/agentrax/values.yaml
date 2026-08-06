@@ -1,0 +1,79 @@
+# Default values for agentrax operator.
+# Override these values in your own values.yaml or via --set flags.
+
+# -- Number of controller-manager replicas.
+replicaCount: 1
+
+image:
+  # -- Controller manager image repository.
+  repository: ghcr.io/gitcommitankit/agentrax
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart's appVersion.
+  tag: ""
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Whether to create a ServiceAccount for the manager.
+  create: true
+  # -- Annotations to add to the ServiceAccount.
+  annotations: {}
+  # -- Name of the ServiceAccount. Auto-generated if empty.
+  name: ""
+
+# -- Pod annotations.
+podAnnotations: {}
+
+# -- Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+
+# -- Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Node selector for the manager pod.
+nodeSelector: {}
+
+# -- Tolerations for the manager pod.
+tolerations: []
+
+# -- Affinity rules for the manager pod.
+affinity: {}
+
+# -- Manager flags
+manager:
+  # -- Enable leader election (set to true for HA / multiple replicas).
+  leaderElect: false
+  # -- Bind address for metrics. Use ":8443" for HTTPS, ":8080" for HTTP.
+  metricsBindAddress: "0"
+  # -- Bind address for health/readiness probes.
+  healthProbeBindAddress: ":8081"
+  # -- GPU resource name used for quota calculation.
+  gpuResourceName: "nvidia.com/gpu"
+
+# -- Environment variables injected into the manager container.
+env:
+  # -- MCP health-check interval (e.g. "30s").
+  AGENTRAX_MCP_HEALTH_INTERVAL: "30s"
+  # -- Registry entry TTL (e.g. "90s").
+  AGENTRAX_REGISTRY_TTL: "90s"

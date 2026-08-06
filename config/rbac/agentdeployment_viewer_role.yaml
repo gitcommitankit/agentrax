@@ -1,0 +1,23 @@
+# permissions for end users to view agentdeployments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: agentrax
+    app.kubernetes.io/managed-by: kustomize
+  name: agentdeployment-viewer-role
+rules:
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments/status
+  verbs:
+  - get
