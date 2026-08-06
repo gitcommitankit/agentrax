@@ -1,17 +1,68 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Prerequisites for AgentDeployment/query-agent
+#
+# Apply in order:
+#   kubectl apply -f config/samples/agentrax_v1alpha1_agentdeployment.yaml
+#
+# The file creates:
+#   1. Namespace      tenant-search
+#   2. TenantQuota    team-search   (governs quota for the AgentDeployment)
+#   3. AgentDeployment query-agent  (references team-search via tenantRef)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 1. Namespace — all resources live here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-search
+  labels:
+    app.kubernetes.io/part-of: agentrax-demo
+
+---
+# 2. TenantQuota — must exist before the AgentDeployment is created.
+#    tenantRef in the AgentDeployment below must match this resource's name.
+apiVersion: agentrax.io/v1alpha1
+kind: TenantQuota
+metadata:
+  name: team-search
+  namespace: tenant-search
+spec:
+  # Maximum total replica count across all AgentDeployments in this namespace.
+  maxTotalReplicas: 10
+  # Maximum number of distinct AgentDeployments allowed.
+  maxAgents: 5
+
+---
+# 3. AgentDeployment — the main resource.
 apiVersion: agentrax.io/v1alpha1
 kind: AgentDeployment
 metadata:
   name: query-agent
-  namespace: default
+  namespace: tenant-search
+  labels:
+    app.kubernetes.io/part-of: agentrax-demo
 spec:
+  # Image of the model/agent container to deploy.
   image: gcr.io/google-containers/echoserver:1.4
+
+  # Port the agent listens on (defaults to 8080 if omitted).
+  port: 8080
+
+  # tenantRef names the TenantQuota in the same namespace that governs quota.
+  # Must match the TenantQuota resource name above.
   tenantRef: team-search
+
+  # replicas defines the autoscaling policy.
   replicas:
     min: 1
     max: 3
     metric: queueDepth
     target: 50
+
+  # rollout defaults to Recreate; no canary steps required for Phase 1.
   rollout:
     strategy: Recreate
+
+  # mcp.expose: false — MCP registration handled in Phase 5.
   mcp:
     expose: false

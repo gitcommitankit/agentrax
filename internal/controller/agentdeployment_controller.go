@@ -19,11 +19,22 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/go-logr/logr"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 )
@@ -37,27 +48,361 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the AgentDeployment object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
+// Reconcile drives the AgentDeployment's observed state toward its declared spec.
+// It creates and self-heals a Deployment, Service, and (when Prometheus Operator is present)
+// a ServiceMonitor as owned child resources, then updates status conditions.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	// TODO(user): your logic here
+	// 1. Fetch the AgentDeployment; return immediately if it has been deleted.
+	ad := &agentraxv1alpha1.AgentDeployment{}
+	if err := r.Get(ctx, req.NamespacedName, ad); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
+	}
+
+	// 2. Handle finalizer lifecycle.
+	if ad.DeletionTimestamp.IsZero() {
+		// Object is not being deleted — ensure our finalizer is present.
+		if !controllerutil.ContainsFinalizer(ad, agentraxv1alpha1.AgentDeploymentFinalizer) {
+			controllerutil.AddFinalizer(ad, agentraxv1alpha1.AgentDeploymentFinalizer)
+			if err := r.Update(ctx, ad); err != nil {
+				return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
+			}
+			// Re-fetch so we have the latest resourceVersion before continuing.
+			if err := r.Get(ctx, req.NamespacedName, ad); err != nil {
+				return ctrl.Result{}, fmt.Errorf("re-fetching after finalizer add: %w", err)
+			}
+		}
+	} else {
+		// Object is being deleted — run cleanup and remove finalizer.
+		if controllerutil.ContainsFinalizer(ad, agentraxv1alpha1.AgentDeploymentFinalizer) {
+			if err := r.runDeletionCleanup(ctx, ad); err != nil {
+				return ctrl.Result{}, fmt.Errorf("running deletion cleanup: %w", err)
+			}
+			controllerutil.RemoveFinalizer(ad, agentraxv1alpha1.AgentDeploymentFinalizer)
+			if err := r.Update(ctx, ad); err != nil {
+				return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// 3. Reconcile child Deployment.
+	if err := r.reconcileDeployment(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
+	}
+
+	// 4. Reconcile child Service.
+	if err := r.reconcileService(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
+	}
+
+	// 5. Reconcile ServiceMonitor when Prometheus Operator is present.
+	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
+	}
+
+	// 6. Derive status from the live Deployment and update it — always last.
+	if result, err := r.updateStatus(ctx, ad, logger); err != nil || result.RequeueAfter > 0 {
+		return result, err
+	}
 
 	return ctrl.Result{}, nil
 }
 
+// runDeletionCleanup performs pre-deletion tasks before the finalizer is removed.
+// Phase 5 will replace this stub with a real MCP deregistration call.
+//
+//nolint:unparam // stub always returns nil; Phase 5 will return real errors
+func (r *AgentDeploymentReconciler) runDeletionCleanup(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	logger := log.FromContext(ctx)
+	logger.Info("running deletion cleanup (MCP deregistration stub)", "name", ad.Name, "namespace", ad.Namespace)
+	return nil
+}
+
+// reconcileDeployment creates or updates the Deployment owned by the AgentDeployment.
+func (r *AgentDeploymentReconciler) reconcileDeployment(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	desired := r.desiredDeployment(ad)
+
+	// CreateOrUpdate requires name+namespace on existing before calling; MutateFn must not set them.
+	existing := &appsv1.Deployment{}
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		existing.Spec = desired.Spec
+		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
+		}
+		return nil
+	})
+	return err
+}
+
+// reconcileService creates or updates the Service owned by the AgentDeployment.
+func (r *AgentDeploymentReconciler) reconcileService(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	desired := r.desiredService(ad)
+
+	existing := &corev1.Service{}
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		// Only overwrite spec fields we own; clusterIP is assigned by the API server.
+		existing.Spec.Selector = desired.Spec.Selector
+		existing.Spec.Ports = desired.Spec.Ports
+		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
+		}
+		return nil
+	})
+	return err
+}
+
+// reconcileServiceMonitor creates or updates the ServiceMonitor owned by the AgentDeployment.
+// It is a no-op when the ServiceMonitor CRD is not installed.
+func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	exists, err := serviceMonitorCRDExists(ctx, r.Client)
+	if err != nil {
+		return fmt.Errorf("checking servicemonitor CRD: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+
+	desired := r.desiredServiceMonitor(ad)
+
+	existing := &monitoringv1.ServiceMonitor{}
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		existing.Spec = desired.Spec
+		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
+		}
+		return nil
+	})
+	return err
+}
+
+// updateStatus derives the AgentDeployment status from the live Deployment and writes it.
+// This is always the last step in the reconcile loop.
+func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment, logger logr.Logger) (ctrl.Result, error) {
+	// Re-fetch the live Deployment to get accurate replica counts.
+	dep := &appsv1.Deployment{}
+	depKey := client.ObjectKey{Name: ad.Name, Namespace: ad.Namespace}
+	if err := r.Get(ctx, depKey, dep); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Deployment not ready yet — requeue.
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("fetching deployment for status: %w", err)
+	}
+
+	// Re-fetch the AgentDeployment with the latest resourceVersion before patching status.
+	latest := &agentraxv1alpha1.AgentDeployment{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(ad), latest); err != nil {
+		return ctrl.Result{}, fmt.Errorf("re-fetching agentdeployment for status update: %w", err)
+	}
+
+	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas
+
+	// Detect ImagePullBackOff by inspecting pod list; requeue if listing fails.
+	imagePullFailed, failMsg, err := r.detectImagePullFailure(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("detecting image pull failure: %w", err)
+	}
+	if imagePullFailed {
+		SetCondition(latest, agentraxv1alpha1.ConditionImagePullFailed, metav1.ConditionTrue, "ImagePullBackOff", failMsg)
+		latest.Status.Phase = agentraxv1alpha1.PhaseDegraded
+	} else {
+		RemoveCondition(latest, agentraxv1alpha1.ConditionImagePullFailed)
+		if dep.Status.ReadyReplicas > 0 {
+			latest.Status.Phase = agentraxv1alpha1.PhaseRunning
+			latest.Status.StableVersion = ad.Spec.Image
+			SetCondition(latest, agentraxv1alpha1.ConditionReady, metav1.ConditionTrue, "DeploymentReady", "Deployment is ready")
+			SetCondition(latest, agentraxv1alpha1.ConditionReconciled, metav1.ConditionTrue, "ReconcileSuccess", "Latest generation reconciled")
+		} else {
+			latest.Status.Phase = agentraxv1alpha1.PhasePending
+			SetCondition(latest, agentraxv1alpha1.ConditionReady, metav1.ConditionFalse, "DeploymentNotReady", "Waiting for pods to become ready")
+			SetCondition(latest, agentraxv1alpha1.ConditionReconciled, metav1.ConditionTrue, "ReconcileSuccess", "Latest generation reconciled")
+		}
+	}
+
+	if err := r.Status().Update(ctx, latest); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+
+	// If still pending, requeue to check readiness again.
+	if latest.Status.Phase == agentraxv1alpha1.PhasePending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	logger.Info("reconciled AgentDeployment", "phase", latest.Status.Phase, "readyReplicas", latest.Status.CurrentReplicas)
+	return ctrl.Result{}, nil
+}
+
+// detectImagePullFailure returns true and a description message when any pod owned
+// by this AgentDeployment is in ImagePullBackOff or ErrImagePull state.
+// It returns an error if the pod list call fails so the caller can requeue.
+func (r *AgentDeploymentReconciler) detectImagePullFailure(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (bool, string, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(ad.Namespace),
+		client.MatchingLabels(agentLabels(ad)),
+	); err != nil {
+		return false, "", fmt.Errorf("listing pods for image pull check: %w", err)
+	}
+
+	imagePullReasons := map[string]bool{"ImagePullBackOff": true, "ErrImagePull": true}
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		for _, cs := range append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...) {
+			if cs.State.Waiting != nil && imagePullReasons[cs.State.Waiting.Reason] {
+				return true, fmt.Sprintf("pod %s: %s", pod.Name, cs.State.Waiting.Message), nil
+			}
+		}
+	}
+	return false, "", nil
+}
+
+// ── Desired-state builders ────────────────────────────────────────────────────
+
+// agentLabels returns the canonical label set applied to all resources owned by ad.
+func agentLabels(ad *agentraxv1alpha1.AgentDeployment) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       ad.Name,
+		"app.kubernetes.io/managed-by": "agentrax",
+		"agentrax.io/tenant":           ad.Spec.TenantRef,
+	}
+}
+
+// desiredDeployment builds the Deployment spec the reconciler wants to exist.
+func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.AgentDeployment) *appsv1.Deployment {
+	port := ad.Spec.Port
+	if port == 0 {
+		port = 8080
+	}
+
+	labels := agentLabels(ad)
+	replicas := ad.Spec.Replicas.Min
+
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ad.Name,
+			Namespace: ad.Namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							// Use a fixed container name that is always DNS-1035 compliant.
+							// The AgentDeployment name is used at the object level, not container level.
+							Name:  "agent",
+							Image: ad.Spec.Image,
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "agent",
+									ContainerPort: port,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
+							Resources: ad.Spec.Resources,
+							Env:       ad.Spec.Env,
+							Args:      ad.Spec.Args,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// desiredService builds the Service spec the reconciler wants to exist.
+func (r *AgentDeploymentReconciler) desiredService(ad *agentraxv1alpha1.AgentDeployment) *corev1.Service {
+	port := ad.Spec.Port
+	if port == 0 {
+		port = 8080
+	}
+
+	labels := agentLabels(ad)
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ad.Name,
+			Namespace: ad.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "agent",
+					Port:       port,
+					TargetPort: intstr.FromInt32(port),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+}
+
+// desiredServiceMonitor builds the ServiceMonitor spec that scrapes /metrics on the agent pods.
+func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.AgentDeployment) *monitoringv1.ServiceMonitor {
+	labels := agentLabels(ad)
+
+	return &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ad.Name,
+			Namespace: ad.Namespace,
+			Labels:    labels,
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector: metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Endpoints: []monitoringv1.Endpoint{
+				{
+					Port: "agent",
+					Path: "/metrics",
+				},
+			},
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
+// It watches the AgentDeployment resource and all owned Deployments and Services
+// so that out-of-band changes to child resources trigger a reconcile.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentraxv1alpha1.AgentDeployment{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
