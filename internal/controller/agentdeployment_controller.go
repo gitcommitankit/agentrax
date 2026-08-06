@@ -299,9 +299,27 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		latest.Status.Phase = agentraxv1alpha1.PhaseDegraded
 	} else {
 		RemoveCondition(latest, agentraxv1alpha1.ConditionImagePullFailed)
-		if dep.Status.ReadyReplicas > 0 {
+
+		// A rollout is complete when the Deployment controller has observed the
+		// latest generation and every replica is both updated and available.
+		// Checking only ReadyReplicas > 0 would promote StableVersion prematurely
+		// while old-image pods are still serving traffic during a rolling update.
+		replicas := int32(1)
+		if dep.Spec.Replicas != nil {
+			replicas = *dep.Spec.Replicas
+		}
+		rolloutComplete := dep.Status.ObservedGeneration >= dep.Generation &&
+			dep.Status.UpdatedReplicas == replicas &&
+			dep.Status.AvailableReplicas == replicas
+
+		if rolloutComplete {
 			latest.Status.Phase = agentraxv1alpha1.PhaseRunning
-			latest.Status.StableVersion = latest.Spec.Image
+			// Derive StableVersion from the image the Deployment controller
+			// applied — not from latest.Spec.Image — so it reflects what is
+			// actually running, even if the spec was updated again since.
+			if len(dep.Spec.Template.Spec.Containers) > 0 {
+				latest.Status.StableVersion = dep.Spec.Template.Spec.Containers[0].Image
+			}
 			SetCondition(latest, agentraxv1alpha1.ConditionReady, metav1.ConditionTrue, "DeploymentReady", "Deployment is ready")
 			SetCondition(latest, agentraxv1alpha1.ConditionReconciled, metav1.ConditionTrue, "ReconcileSuccess", "Latest generation reconciled")
 		} else {

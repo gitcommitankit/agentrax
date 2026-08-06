@@ -381,6 +381,44 @@ var _ = Describe("AgentDeployment Controller", func() {
 				return dep.Spec.Template.Spec.Containers[0].Image
 			}, testTimeout, testInterval).Should(Equal("nginx:1.25"), "child Deployment image should be updated")
 		})
+
+		It("does not advance StableVersion during a partial rollout", func() {
+			// Record the StableVersion before the image change. In envtest no pods
+			// run, so the initial StableVersion is empty (rollout never completes).
+			// After updating the image the Deployment generation advances but
+			// ObservedGeneration / UpdatedReplicas / AvailableReplicas never satisfy
+			// the rollout-complete gate — so StableVersion must stay empty.
+			ad := &agentraxv1alpha1.AgentDeployment{}
+			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+			stableVersionBefore := ad.Status.StableVersion
+
+			ad.Spec.Image = "nginx:1.25"
+			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+
+			// Wait for the Deployment spec to reflect the new image so we know the
+			// reconciler has processed the update.
+			Eventually(func() string {
+				dep := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, key, dep); err != nil {
+					return ""
+				}
+				if len(dep.Spec.Template.Spec.Containers) == 0 {
+					return ""
+				}
+				return dep.Spec.Template.Spec.Containers[0].Image
+			}, testTimeout, testInterval).Should(Equal("nginx:1.25"), "Deployment spec image should be updated")
+
+			// Give the reconciler a moment to run and potentially update status,
+			// then assert StableVersion has not advanced beyond its pre-update value.
+			Consistently(func() string {
+				current := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, current); err != nil {
+					return ""
+				}
+				return current.Status.StableVersion
+			}, 2*time.Second, testInterval).Should(Equal(stableVersionBefore),
+				"StableVersion must not advance while rollout is incomplete")
+		})
 	})
 
 	Describe("Self-healing", func() {
