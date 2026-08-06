@@ -363,11 +363,17 @@ var _ = Describe("AgentDeployment Controller", func() {
 		})
 
 		It("updates the child Deployment image when spec.image changes", func() {
-			// Update the image field.
-			ad := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
-			ad.Spec.Image = "nginx:1.25"
-			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+			// Wrap Get+Update in Eventually to handle 409 Conflict: the reconciler
+			// may bump the resourceVersion (finalizer add, status write) between
+			// the test's Get and Update, causing a stale-object conflict.
+			Eventually(func() error {
+				ad := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, ad); err != nil {
+					return err
+				}
+				ad.Spec.Image = "nginx:1.25"
+				return k8sClient.Update(ctx, ad)
+			}, testTimeout, testInterval).Should(Succeed(), "spec.image update should be accepted without conflict")
 
 			// Verify the child Deployment picks up the new image.
 			Eventually(func() string {
@@ -388,12 +394,26 @@ var _ = Describe("AgentDeployment Controller", func() {
 			// After updating the image the Deployment generation advances but
 			// ObservedGeneration / UpdatedReplicas / AvailableReplicas never satisfy
 			// the rollout-complete gate — so StableVersion must stay empty.
-			ad := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
-			stableVersionBefore := ad.Status.StableVersion
+			var stableVersionBefore string
+			// Wrap Get in Eventually to read a fully-settled object before capturing the baseline.
+			Eventually(func() error {
+				ad := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, ad); err != nil {
+					return err
+				}
+				stableVersionBefore = ad.Status.StableVersion
+				return nil
+			}, testTimeout, testInterval).Should(Succeed())
 
-			ad.Spec.Image = "nginx:1.25"
-			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+			// Wrap Get+Update in Eventually to handle 409 Conflict (same as above).
+			Eventually(func() error {
+				ad := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, ad); err != nil {
+					return err
+				}
+				ad.Spec.Image = "nginx:1.25"
+				return k8sClient.Update(ctx, ad)
+			}, testTimeout, testInterval).Should(Succeed(), "spec.image update should be accepted without conflict")
 
 			// Wait for the Deployment spec to reflect the new image so we know the
 			// reconciler has processed the update.
