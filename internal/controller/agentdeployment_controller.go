@@ -24,6 +24,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -260,11 +261,11 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		return ctrl.Result{}, fmt.Errorf("re-fetching agentdeployment for status update: %w", err)
 	}
 
-	// Snapshot the current status so we can detect changes after computing new values.
-	prevPhase := latest.Status.Phase
-	prevReplicas := latest.Status.CurrentReplicas
-	prevStable := latest.Status.StableVersion
-	prevConditionLen := len(latest.Status.Conditions)
+	// Deep-copy the current status before mutating so we can compare the full
+	// before/after with equality.Semantic.DeepEqual. This catches intra-condition
+	// changes (e.g. Reason, Message, LastTransitionTime updates at the same
+	// condition count) that a scalar/len check would silently miss.
+	prevStatus := latest.Status.DeepCopy()
 
 	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas
 
@@ -292,12 +293,7 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 
 	// Only write status when something actually changed to avoid spurious API
 	// calls and watch events on every reconcile.
-	statusChanged := latest.Status.Phase != prevPhase ||
-		latest.Status.CurrentReplicas != prevReplicas ||
-		latest.Status.StableVersion != prevStable ||
-		len(latest.Status.Conditions) != prevConditionLen
-
-	if statusChanged {
+	if !equality.Semantic.DeepEqual(prevStatus, &latest.Status) {
 		if err := r.Status().Update(ctx, latest); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 		}

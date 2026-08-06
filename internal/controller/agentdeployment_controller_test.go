@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 )
 
@@ -82,6 +84,38 @@ func deleteAgentDeployment(key types.NamespacedName) {
 		err := k8sClient.Get(ctx, key, &agentraxv1alpha1.AgentDeployment{})
 		return apierrors.IsNotFound(err)
 	}, testTimeout, testInterval).Should(BeTrue(), "AgentDeployment should be fully deleted")
+}
+
+// deleteChildResources explicitly deletes child Deployment, Service, and
+// ServiceMonitor objects with the given key.
+// Envtest does not run the Kubernetes GC controller, so owner-reference-based
+// cascading deletion never fires; tests that share a namespace must clean up
+// children themselves to prevent stale owner UIDs from bleeding into sibling
+// specs.
+func deleteChildResources(key types.NamespacedName) {
+	dep := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, key, dep); err == nil {
+		_ = k8sClient.Delete(ctx, dep)
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &appsv1.Deployment{}))
+		}, testTimeout, testInterval).Should(BeTrue(), "child Deployment should be deleted")
+	}
+
+	svc := &corev1.Service{}
+	if err := k8sClient.Get(ctx, key, svc); err == nil {
+		_ = k8sClient.Delete(ctx, svc)
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &corev1.Service{}))
+		}, testTimeout, testInterval).Should(BeTrue(), "child Service should be deleted")
+	}
+
+	sm := &monitoringv1.ServiceMonitor{}
+	if err := k8sClient.Get(ctx, key, sm); err == nil {
+		_ = k8sClient.Delete(ctx, sm)
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &monitoringv1.ServiceMonitor{}))
+		}, testTimeout, testInterval).Should(BeTrue(), "child ServiceMonitor should be deleted")
+	}
 }
 
 var _ = Describe("AgentDeployment Controller", func() {
@@ -183,6 +217,9 @@ var _ = Describe("AgentDeployment Controller", func() {
 
 		AfterEach(func() {
 			deleteAgentDeployment(key)
+			// Explicitly delete child resources; envtest does not run the GC
+			// controller, so owner-reference cascading deletion never fires.
+			deleteChildResources(key)
 		})
 
 		It("creates a Deployment with correct image and port", func() {
@@ -255,6 +292,31 @@ var _ = Describe("AgentDeployment Controller", func() {
 			Expect(svc.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
 			Expect(svc.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*svc.OwnerReferences[0].Controller).To(BeTrue(), "owner reference must have Controller=true")
+		})
+
+		It("creates a ServiceMonitor with owner reference pointing to the AgentDeployment", func() {
+			// This test exercises the hasServiceMonitorCRD=true code path, which is
+			// enabled by loading the ServiceMonitor CRD into envtest via
+			// config/crd/external/monitoring.coreos.com_servicemonitors.yaml.
+			sm := &monitoringv1.ServiceMonitor{}
+			parent := &agentraxv1alpha1.AgentDeployment{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, key, parent); err != nil {
+					return false
+				}
+				if err := k8sClient.Get(ctx, key, sm); err != nil {
+					return false
+				}
+				if len(sm.OwnerReferences) != 1 {
+					return false
+				}
+				return sm.OwnerReferences[0].UID == parent.UID
+			}, testTimeout, testInterval).Should(BeTrue(), "ServiceMonitor owner UID should converge to parent UID")
+
+			Expect(sm.OwnerReferences[0].Name).To(Equal(key.Name))
+			Expect(sm.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(sm.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*sm.OwnerReferences[0].Controller).To(BeTrue(), "ServiceMonitor owner reference must have Controller=true")
 		})
 
 		It("sets status.phase to Pending initially (no running pods in envtest)", func() {
