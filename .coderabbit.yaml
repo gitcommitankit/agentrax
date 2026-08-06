@@ -1,0 +1,271 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+# ─────────────────────────────────────────────────────────────────────────────
+# CodeRabbit configuration for Agentrax
+# Docs: https://docs.coderabbit.ai/guides/configure-coderabbit
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ----- Top-level review behaviour -----
+language: en-US
+
+tone_instructions: >
+  Be direct and precise. Prefer concise, actionable feedback over lengthy
+  explanations. Flag real bugs and architecture violations clearly; avoid
+  nitpicking obvious style choices that golangci-lint already enforces.
+
+reviews:
+  # "assertive" requests changes on clear violations; "chill" only comments.
+  profile: assertive
+
+  # Post a concise summary at the top of every PR review.
+  high_level_summary: true
+
+  # Skip the auto-generated haiku — keep the review professional.
+  poem: false
+
+  # Show review status badges on the PR.
+  review_status: true
+
+  # Re-review on every new push to the PR branch.
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  # Collapse resolved comment threads automatically.
+  collapse_walkthrough: true
+
+  # ── Path filters ──────────────────────────────────────────────────────────
+  # Excluded: scratch files, generated artifacts, vendor deps, binary output.
+  path_filters:
+    - "!rough/**" # design scratch notes — not production code
+    - "!bin/**" # compiled binaries
+    - "!cover.out" # coverage artefact
+    - "!**/*.pb.go" # protobuf generated files
+    - "!**/zz_generated*.go" # controller-gen generated deepcopy / webhook code
+    - "!go.sum" # lockfile — changes are mechanical, not reviewed
+    - "!hack/**" # build-time helper scripts
+
+  # ── Path-specific instructions ────────────────────────────────────────────
+  path_instructions:
+    # CRD types — every field must carry a GoDoc comment because controller-gen
+    # turns comments into OpenAPI schema descriptions used by kubectl explain.
+    - path: "api/v1alpha1/**"
+      instructions: |
+        - Every exported struct field MUST have a GoDoc comment; it becomes the
+          OpenAPI description in the CRD manifest.
+        - The API group is `agentrax.io` (never `agentrax.agentrax.io`). Flag
+          any `+kubebuilder:rbac` or `groupversion_info.go` that uses the wrong
+          group.
+        - `status.phase` must be one of exactly: Pending, Running,
+          RolloutInProgress, RolloutFailed, Degraded. Reject any new value that
+          is not documented in `agentdeployment_types.go`.
+        - Rollout terminology is always "stable"/"canary". Flag any use of
+          "blue/green", "primary/secondary", or similar.
+        - Finalizer constant must be `AgentDeploymentFinalizer` = `"agentrax.io/mcp-deregister"`.
+          Never hardcode the string directly; always use the constant.
+        - Validation markers (`+kubebuilder:validation:*`) on spec fields must
+          match the rules in docs/agentrax.md section 6.3. Pay special attention
+          to enum values for `spec.replicas.metric` and `spec.rollout.strategy`.
+
+    # Reconciler — enforce controller-runtime patterns strictly.
+    - path: "internal/controller/**"
+      instructions: |
+        - Always check `apierrors.IsNotFound` immediately after `Get`; return
+          `ctrl.Result{}` (no error) — the object was deleted.
+        - Status must be updated LAST, after all child resources are reconciled.
+          Any `status` write that occurs before `CreateOrUpdate` of children is
+          a bug.
+        - Use `controllerutil.CreateOrUpdate` for all owned child resources
+          (Deployment, Service, ServiceMonitor, HPA). Never use Create + Update
+          in sequence; that breaks idempotency.
+        - Transient errors must be requeued with `ctrl.Result{RequeueAfter: d}`,
+          NOT `ctrl.Result{Requeue: true}`. The latter produces a tight loop.
+        - Every child resource must have an owner reference set via
+          `controllerutil.SetControllerReference`. Missing owner refs cause
+          orphaned resources on parent deletion.
+        - Errors must be returned up the call stack wrapped with context:
+          `fmt.Errorf("reconciling deployment: %w", err)`. Never swallow errors
+          silently (no bare `_ = err` or empty `if err != nil {}`).
+        - Use `meta.SetStatusCondition` from `k8s.io/apimachinery/pkg/api/meta`.
+          Never manipulate `status.conditions` slices directly.
+
+    # Rollout — the hardest logic; sample-size gating is a load-bearing safety.
+    - path: "internal/rollout/**"
+      instructions: |
+        - `minRequestSample` must be checked BEFORE evaluating any rollback
+          threshold. Evaluating error rate or p99 latency on fewer samples than
+          `minRequestSample` is a correctness bug, not a style issue.
+        - Sample count below `minRequestSample` must extend the pause (up to the
+          15-minute max-wait cap). It must NEVER trigger a rollback decision.
+        - Prometheus unreachable during a pause window must result in a fail-safe
+          rollback after 60 s — never an indefinite hang.
+        - PromQL queries must live in `internal/rollout/promql.go` as
+          parameterized templates. No ad-hoc string building of PromQL outside
+          that file.
+        - The rollout state machine states are exactly: Idle, Progressing,
+          Promoted, Failed. Flag any new intermediate state not in this set.
+        - During an active canary: the stable HPA must be deleted (paused) and
+          no HPA must be created for the canary track. Flag any code that
+          creates a canary HPA.
+        - Autoscaling only resumes (HPA recreated) after promotion or rollback —
+          never mid-canary.
+        - Rollout terminology: "stable"/"canary" only. Reject any use of
+          "blue/green", "primary", "secondary" as conceptual labels in code or
+          comments.
+
+    # Quota — concurrency safety is a hard requirement.
+    - path: "internal/quota/**"
+      instructions: |
+        - `CanAdmit` must be a pure function (no cluster calls).
+        - In-flight reservation must be used for concurrent near-limit creates.
+          A naive read-then-write pattern against `status.usedAgents` is a race
+          condition. Flag any quota check that does not use the reservation map.
+        - Lowering TenantQuota below current usage must set `OverQuota`
+          condition. It must NEVER forcibly delete existing resources.
+        - GPU count must be derived from `resources.limits["nvidia.com/gpu"]`
+          (or the configurable `--gpu-resource-name` flag). Never assume CPU
+          limits imply GPU limits.
+
+    # MCP registry — protocol correctness and TTL hygiene.
+    - path: "internal/registry/**"
+      instructions: |
+        - Registration requires a successful MCP-level `initialize` handshake,
+          not just Kubernetes pod readiness. A pod can be Ready and still
+          correctly absent from the registry. Flag any code that registers
+          without a confirmed handshake.
+        - Every registry entry must carry a TTL and be refreshed by a heartbeat.
+          Entries that stop being refreshed must expire automatically. Never
+          rely solely on the deletion event for deregistration.
+        - The finalizer (`agentrax.io/mcp-deregister`) must be removed ONLY
+          after confirmed deregistration. Removing it before deregistration or
+          on a best-effort basis is a correctness bug.
+        - The registry is backed by a ConfigMap (`agentrax-registry` in
+          `agentrax-system`). No new database, no separate Deployment — HA
+          storage is a v2 item. Flag any change that introduces a new storage
+          backend.
+        - Registration must be idempotent and keyed by `namespace/name`.
+          Duplicate registrations must not create duplicate entries.
+
+    # Scaling — HPA generation and quota enforcement.
+    - path: "internal/scaling/**"
+      instructions: |
+        - Scale-up must be capped at `min(spec.replicas.max, quota_headroom)`.
+          Exceeding the tenant's remaining quota ceiling is a hard bug.
+        - Scale-down must respect `spec.replicas.min`. Replica count must never
+          drop below min, including at zero traffic.
+        - HPA stabilization windows: scale-up 60s, scale-down 300s. Flag any
+          change to these without an explicit justification.
+        - Metric source temporarily unavailable must hold the last-known-good
+          value for a bounded staleness window, not scale to zero.
+
+    # Webhook — admission correctness.
+    - path: "api/v1alpha1/webhook.go"
+      instructions: |
+        - Webhook must use the in-flight reservation from `internal/quota` for
+          concurrent near-limit creates. A check against only
+          `TenantQuota.status` is a race condition.
+        - Mutating webhook must default: `rollout.strategy to Recreate`,
+          `port to 8080`, and `resources to conservative default` when omitted.
+        - Canary strategy must require non-empty `steps` and all three
+          `rollback` fields (`maxErrorRate`, `maxP99LatencyMs`,
+          `minRequestSample`). Missing any is a validation error.
+        - Each `CanaryStep` must have exactly one of `setWeight` or `pause` set
+          — never both, never neither.
+        - Reject image updates when `status.phase == RolloutInProgress`
+          (concurrent rollout prevention).
+
+    # Integration tests — envtest suite.
+    - path: "internal/controller/**_test.go"
+      instructions: |
+        - Tests must use `envtest` (real API server + etcd). No fake/mock
+          clients for integration tests.
+        - Assert owner references on every created child resource. A test that
+          skips owner-ref assertions misses a real production failure mode.
+        - Cover finalizer ordering: deletion of an `AgentDeployment` must
+          deregister from MCP before the Service is GC'd.
+
+    # Unit tests — pure logic coverage.
+    - path: "internal/quota/**_test.go"
+      instructions: |
+        - Must include concurrent-create scenarios (two goroutines, one slot).
+        - Table-driven: at-limit, over-limit, GPU extraction edge cases, and
+          concurrent reservation release.
+
+    - path: "internal/rollout/**_test.go"
+      instructions: |
+        - Must cover sample-size gating (below minRequestSample triggers no
+          rollback decision).
+        - Must cover Prometheus-unreachable path (fail-safe rollback after 60s).
+        - Use real Prometheus response JSON fixtures, not ad-hoc mock strings.
+
+    # Helm chart — packaging correctness.
+    - path: "charts/**"
+      instructions: |
+        - All `AGENTRAX_*` environment variables must be configurable via
+          chart values.
+        - `helm test` hook must smoke-test with a TenantQuota + AgentDeployment.
+        - CRD manifests in the chart must match the generated CRDs in
+          `config/crd/`. Drift between them is a release bug.
+
+    # GitHub Actions CI.
+    - path: ".github/**"
+      instructions: |
+        - CI must run in order: lint, unit tests, integration tests,
+          docker build, E2E (on kind). Skipping any stage is a regression.
+        - Pinned action versions (SHA or tagged version) required for security.
+        - E2E tests must run against a `kind` cluster with Prometheus,
+          Prometheus Adapter, Gateway API CRDs, and cert-manager installed.
+
+    # Docs — keep in sync with architecture decisions.
+    - path: "docs/**"
+      instructions: |
+        - Any change to a CRD field, architecture boundary, or package
+          responsibility must be reflected here in the same PR.
+        - `docs/agentrax.md` is the source of truth for architecture decisions.
+          Flag any PR that changes architecture without updating it.
+
+  # ── Custom review instructions (global) ──────────────────────────────────
+  instructions: |
+    ## Agentrax-specific review checklist
+
+    ### Go conventions (apply to every Go file)
+    - Errors are always returned and wrapped: `fmt.Errorf("doing X: %w", err)`.
+      Any silent discard (`_ = err` or empty `if err != nil {}`) is a bug.
+    - All exported symbols (packages, types, struct fields, constants,
+      variables, functions) must have GoDoc comments starting with the symbol
+      name. Missing GoDoc on an exported symbol is a documentation bug.
+    - Comments must explain WHY, not WHAT the code does. Remove any comment
+      that only restates the code.
+    - No `panic` in controller/reconciler paths. Use proper error returns.
+
+    ### Architecture guardrails (flag any violation)
+    - API group is `agentrax.io`, never `agentrax.agentrax.io`.
+    - Traffic splitting is via Gateway API `HTTPRoute`. Flag any PR that
+      introduces Istio VirtualService, ingress annotations, or a custom proxy
+      for traffic splitting.
+    - Autoscaling is via native HPA + Prometheus Adapter. Flag any custom
+      scaling loop.
+    - MCP registry is embedded in the operator process, backed by a ConfigMap.
+      Flag any PR that extracts it to a separate Deployment or introduces a
+      new storage backend.
+    - No model training, fine-tuning, MLOps, or UI features — explicitly out
+      of scope for v1. Flag any drift toward these.
+
+    ### Non-goals (hard stop)
+    - Never implement Istio, Linkerd, or service mesh features.
+    - Never implement a model registry, experiment tracking, or dataset versioning.
+    - Never build a UI (web dashboard, CLI other than kubectl) in v1.
+
+# ----- Chat (interactive Q&A) -----
+chat:
+  auto_reply: true
+
+# ----- Knowledge base -----
+knowledge_base:
+  # Let CodeRabbit learn from past PR decisions in this repo.
+  learnings:
+    scope: auto
+  # Pull issues as context when the PR description references them.
+  issues:
+    scope: auto
