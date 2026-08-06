@@ -260,6 +260,12 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		return ctrl.Result{}, fmt.Errorf("re-fetching agentdeployment for status update: %w", err)
 	}
 
+	// Snapshot the current status so we can detect changes after computing new values.
+	prevPhase := latest.Status.Phase
+	prevReplicas := latest.Status.CurrentReplicas
+	prevStable := latest.Status.StableVersion
+	prevConditionLen := len(latest.Status.Conditions)
+
 	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas
 
 	// Detect ImagePullBackOff by inspecting pod list; requeue if listing fails.
@@ -284,8 +290,17 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		}
 	}
 
-	if err := r.Status().Update(ctx, latest); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	// Only write status when something actually changed to avoid spurious API
+	// calls and watch events on every reconcile.
+	statusChanged := latest.Status.Phase != prevPhase ||
+		latest.Status.CurrentReplicas != prevReplicas ||
+		latest.Status.StableVersion != prevStable ||
+		len(latest.Status.Conditions) != prevConditionLen
+
+	if statusChanged {
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+		}
 	}
 
 	// If still pending, requeue to check readiness again.

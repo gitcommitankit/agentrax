@@ -137,15 +137,13 @@ var _ = Describe("AgentDeployment Controller", func() {
 				return k8sClient.Get(ctx, key, &corev1.Service{})
 			}, testTimeout, testInterval).Should(Succeed(), "child Service should exist before deletion")
 
-			// Inject a Deregister hook that records whether the Service still exists
-			// at the moment deregistration is called (i.e., before the finalizer is
-			// removed and GC runs).
-			var hookCalled bool
-			var serviceExistedDuringDeregister bool
+			// Inject a Deregister hook. A buffered channel is used so the hook
+			// (called on the reconciler goroutine) can pass its observation to the
+			// test goroutine without a data race on plain booleans.
+			resultCh := make(chan bool, 1)
 			testReconciler.Deregister = func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
-				hookCalled = true
 				err := k8sClient.Get(hctx, key, &corev1.Service{})
-				serviceExistedDuringDeregister = (err == nil)
+				resultCh <- (err == nil)
 				return nil
 			}
 			DeferCleanup(func() { testReconciler.Deregister = nil })
@@ -157,8 +155,12 @@ var _ = Describe("AgentDeployment Controller", func() {
 				return apierrors.IsNotFound(err)
 			}, testTimeout, testInterval).Should(BeTrue(), "object should be gone once finalizer removed")
 
+			// Receive the hook result. By the time the AD is fully deleted the hook
+			// has already sent, so this receive never blocks.
+			var serviceExistedDuringDeregister bool
+			Eventually(resultCh, testTimeout, testInterval).Should(Receive(&serviceExistedDuringDeregister))
+
 			// Assert deregistration happened while the Service was still alive.
-			Expect(hookCalled).To(BeTrue(), "Deregister hook should have been called")
 			Expect(serviceExistedDuringDeregister).To(BeTrue(), "Service should exist during deregistration (before GC)")
 
 			// NOTE: envtest does not run the Kubernetes garbage-collection controller,
@@ -195,14 +197,28 @@ var _ = Describe("AgentDeployment Controller", func() {
 		})
 
 		It("creates a Deployment with owner reference pointing to the AgentDeployment", func() {
+			// Fetch parent and child together inside Eventually so we wait for the
+			// reconciler to update the owner reference when the namespace is reused
+			// across test runs (envtest does not GC child objects between runs).
 			dep := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, key, dep)
-			}, testTimeout, testInterval).Should(Succeed())
+			parent := &agentraxv1alpha1.AgentDeployment{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, key, parent); err != nil {
+					return false
+				}
+				if err := k8sClient.Get(ctx, key, dep); err != nil {
+					return false
+				}
+				if len(dep.OwnerReferences) != 1 {
+					return false
+				}
+				return dep.OwnerReferences[0].UID == parent.UID
+			}, testTimeout, testInterval).Should(BeTrue(), "Deployment owner UID should converge to parent UID")
 
-			Expect(dep.OwnerReferences).To(HaveLen(1))
 			Expect(dep.OwnerReferences[0].Name).To(Equal(key.Name))
 			Expect(dep.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(dep.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*dep.OwnerReferences[0].Controller).To(BeTrue(), "owner reference must have Controller=true")
 		})
 
 		It("creates a Service targeting the correct port", func() {
@@ -217,14 +233,28 @@ var _ = Describe("AgentDeployment Controller", func() {
 		})
 
 		It("creates a Service with owner reference pointing to the AgentDeployment", func() {
+			// Fetch parent and child together inside Eventually so we wait for the
+			// reconciler to update the owner reference when the namespace is reused
+			// across test runs (envtest does not GC child objects between runs).
 			svc := &corev1.Service{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, key, svc)
-			}, testTimeout, testInterval).Should(Succeed())
+			parent := &agentraxv1alpha1.AgentDeployment{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, key, parent); err != nil {
+					return false
+				}
+				if err := k8sClient.Get(ctx, key, svc); err != nil {
+					return false
+				}
+				if len(svc.OwnerReferences) != 1 {
+					return false
+				}
+				return svc.OwnerReferences[0].UID == parent.UID
+			}, testTimeout, testInterval).Should(BeTrue(), "Service owner UID should converge to parent UID")
 
-			Expect(svc.OwnerReferences).To(HaveLen(1))
 			Expect(svc.OwnerReferences[0].Name).To(Equal(key.Name))
 			Expect(svc.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(svc.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*svc.OwnerReferences[0].Controller).To(BeTrue(), "owner reference must have Controller=true")
 		})
 
 		It("sets status.phase to Pending initially (no running pods in envtest)", func() {
