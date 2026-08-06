@@ -43,6 +43,15 @@ import (
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// hasServiceMonitorCRD is set once during SetupWithManager and determines
+	// whether ServiceMonitor reconciliation is attempted at all.
+	hasServiceMonitorCRD bool
+
+	// Deregister is an optional hook called during deletion cleanup before the
+	// finalizer is removed. Phase 5 will set this to a real MCP deregistration
+	// function. In tests it can be used to assert ordering invariants.
+	Deregister func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
 }
 
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -121,12 +130,17 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // runDeletionCleanup performs pre-deletion tasks before the finalizer is removed.
-// Phase 5 will replace this stub with a real MCP deregistration call.
-//
-//nolint:unparam // stub always returns nil; Phase 5 will return real errors
+// If a Deregister hook is set on the reconciler, it is called here so that
+// deregistration happens while child resources (Service, Deployment) still exist.
+// Phase 5 will set Deregister to the real MCP deregistration implementation.
 func (r *AgentDeploymentReconciler) runDeletionCleanup(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 	logger := log.FromContext(ctx)
-	logger.Info("running deletion cleanup (MCP deregistration stub)", "name", ad.Name, "namespace", ad.Namespace)
+	if r.Deregister != nil {
+		if err := r.Deregister(ctx, ad); err != nil {
+			return fmt.Errorf("deregistering agent: %w", err)
+		}
+	}
+	logger.Info("deletion cleanup complete", "name", ad.Name, "namespace", ad.Namespace)
 	return nil
 }
 
@@ -141,13 +155,39 @@ func (r *AgentDeploymentReconciler) reconcileDeployment(ctx context.Context, ad 
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
-		existing.Spec = desired.Spec
+
+		// Preserve the existing immutable selector on update; only set it on create
+		// (when ResourceVersion is empty). Overwriting spec.selector on an existing
+		// Deployment is rejected by the API server because it is immutable.
+		if existing.ResourceVersion == "" {
+			existing.Spec.Selector = desired.Spec.Selector
+		}
+
+		// Update only the fields the controller owns; do not wholesale replace
+		// spec so API-defaulted values (e.g. strategy, progressDeadlineSeconds)
+		// are preserved.
+		existing.Spec.Replicas = desired.Spec.Replicas
+		existing.Spec.Template.Labels = desired.Spec.Template.Labels
+		if len(existing.Spec.Template.Spec.Containers) == 0 {
+			existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
+		} else {
+			c := &existing.Spec.Template.Spec.Containers[0]
+			c.Image = desired.Spec.Template.Spec.Containers[0].Image
+			c.Ports = desired.Spec.Template.Spec.Containers[0].Ports
+			c.Resources = desired.Spec.Template.Spec.Containers[0].Resources
+			c.Env = desired.Spec.Template.Spec.Containers[0].Env
+			c.Args = desired.Spec.Template.Spec.Containers[0].Args
+		}
+
 		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
 			return fmt.Errorf("setting controller reference: %w", err)
 		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("reconciling deployment: %w", err)
+	}
+	return nil
 }
 
 // reconcileService creates or updates the Service owned by the AgentDeployment.
@@ -172,13 +212,9 @@ func (r *AgentDeploymentReconciler) reconcileService(ctx context.Context, ad *ag
 }
 
 // reconcileServiceMonitor creates or updates the ServiceMonitor owned by the AgentDeployment.
-// It is a no-op when the ServiceMonitor CRD is not installed.
+// It is a no-op when the ServiceMonitor CRD was not present at manager startup.
 func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
-	exists, err := serviceMonitorCRDExists(ctx, r.Client)
-	if err != nil {
-		return fmt.Errorf("checking servicemonitor CRD: %w", err)
-	}
-	if !exists {
+	if !r.hasServiceMonitorCRD {
 		return nil
 	}
 
@@ -188,7 +224,7 @@ func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context,
 	existing.Name = desired.Name
 	existing.Namespace = desired.Namespace
 
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
 		existing.Spec = desired.Spec
 		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
@@ -214,8 +250,13 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 	}
 
 	// Re-fetch the AgentDeployment with the latest resourceVersion before patching status.
+	// If the object was deleted between the start of reconcile and now, treat it
+	// as a no-op rather than an error — the deletion path has already handled cleanup.
 	latest := &agentraxv1alpha1.AgentDeployment{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(ad), latest); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("re-fetching agentdeployment for status update: %w", err)
 	}
 
@@ -397,12 +438,26 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 }
 
 // SetupWithManager sets up the controller with the Manager.
-// It watches the AgentDeployment resource and all owned Deployments and Services
-// so that out-of-band changes to child resources trigger a reconcile.
+// It uses an uncached API reader to check once whether the ServiceMonitor CRD is
+// installed, stores the result on the reconciler, and conditionally adds an
+// Owns watch for ServiceMonitor so that out-of-band deletions trigger a reconcile.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	// Check CRD presence once at startup using the uncached reader so we don't
+	// require apiextensionsv1 to be registered in the caching informer scheme.
+	var err error
+	r.hasServiceMonitorCRD, err = serviceMonitorCRDExists(context.Background(), mgr.GetAPIReader())
+	if err != nil {
+		return fmt.Errorf("checking servicemonitor CRD at setup: %w", err)
+	}
+
+	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
-		Complete(r)
+		Owns(&corev1.Service{})
+
+	if r.hasServiceMonitorCRD {
+		bldr = bldr.Owns(&monitoringv1.ServiceMonitor{})
+	}
+
+	return bldr.Complete(r)
 }

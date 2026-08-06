@@ -20,6 +20,7 @@ import (
 	"context"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,13 +28,14 @@ import (
 const serviceMonitorCRDName = "servicemonitors.monitoring.coreos.com"
 
 // serviceMonitorCRDExists reports whether the ServiceMonitor CRD is installed in the cluster.
-// When Prometheus Operator is absent (e.g., a bare kind cluster or envtest without extra CRDs),
+// It accepts a client.Reader so callers can pass either a caching client or an
+// uncached API reader (mgr.GetAPIReader()). When Prometheus Operator is absent,
 // the reconciler skips ServiceMonitor creation rather than erroring out.
-func serviceMonitorCRDExists(ctx context.Context, c client.Client) (bool, error) {
+func serviceMonitorCRDExists(ctx context.Context, r client.Reader) (bool, error) {
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	err := c.Get(ctx, client.ObjectKey{Name: serviceMonitorCRDName}, crd)
+	err := r.Get(ctx, client.ObjectKey{Name: serviceMonitorCRDName}, crd)
 	if err != nil {
-		if client.IgnoreNotFound(err) == nil {
+		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, err

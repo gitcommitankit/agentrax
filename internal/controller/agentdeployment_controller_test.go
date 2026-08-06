@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -131,12 +132,40 @@ var _ = Describe("AgentDeployment Controller", func() {
 				return false
 			}, testTimeout, testInterval).Should(BeTrue())
 
-			// Delete the object — the reconciler must remove the finalizer.
+			// Wait for the child Service to exist before we delete the parent.
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, &corev1.Service{})
+			}, testTimeout, testInterval).Should(Succeed(), "child Service should exist before deletion")
+
+			// Inject a Deregister hook that records whether the Service still exists
+			// at the moment deregistration is called (i.e., before the finalizer is
+			// removed and GC runs).
+			var hookCalled bool
+			var serviceExistedDuringDeregister bool
+			testReconciler.Deregister = func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
+				hookCalled = true
+				err := k8sClient.Get(hctx, key, &corev1.Service{})
+				serviceExistedDuringDeregister = (err == nil)
+				return nil
+			}
+			DeferCleanup(func() { testReconciler.Deregister = nil })
+
+			// Delete the object — the reconciler must call Deregister, then remove the finalizer.
 			Expect(k8sClient.Delete(ctx, ad)).To(Succeed())
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, key, &agentraxv1alpha1.AgentDeployment{})
 				return apierrors.IsNotFound(err)
 			}, testTimeout, testInterval).Should(BeTrue(), "object should be gone once finalizer removed")
+
+			// Assert deregistration happened while the Service was still alive.
+			Expect(hookCalled).To(BeTrue(), "Deregister hook should have been called")
+			Expect(serviceExistedDuringDeregister).To(BeTrue(), "Service should exist during deregistration (before GC)")
+
+			// NOTE: envtest does not run the Kubernetes garbage-collection controller,
+			// so owner-reference-based cascading deletion of the child Service cannot
+			// be verified here. The ordering invariant above (deregistration runs while
+			// the Service is still alive) is the critical correctness property. GC
+			// ordering is covered by a real-cluster e2e test in Phase 6.
 		})
 	})
 

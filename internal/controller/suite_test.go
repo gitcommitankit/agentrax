@@ -28,6 +28,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,6 +53,11 @@ var testEnv *envtest.Environment
 var ctx context.Context
 var cancel context.CancelFunc
 var mgrDone chan struct{}
+
+// testReconciler is the AgentDeploymentReconciler registered with the manager.
+// Tests that need to inject a Deregister hook can set it before the action
+// and clear it in AfterEach to avoid contaminating other tests.
+var testReconciler *AgentDeploymentReconciler
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -88,6 +94,9 @@ var _ = BeforeSuite(func() {
 	Expect(corev1.AddToScheme(scheme.Scheme)).To(Succeed())
 	// Register prometheus-operator types so the reconciler can handle ServiceMonitor objects.
 	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// Register apiextensions types so serviceMonitorCRDExists can decode CRD objects
+	// when called from SetupWithManager via the uncached API reader.
+	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 
@@ -103,10 +112,11 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect((&AgentDeploymentReconciler{
+	testReconciler = &AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr)).To(Succeed())
+	}
+	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 
 	mgrDone = make(chan struct{})
 	go func() {
