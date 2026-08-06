@@ -26,12 +26,19 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -45,10 +52,15 @@ var k8sClient client.Client
 var testEnv *envtest.Environment
 var ctx context.Context
 var cancel context.CancelFunc
+var mgrDone chan struct{}
+
+// testReconciler is the AgentDeploymentReconciler registered with the manager.
+// Tests that need to inject a Deregister hook can set it before the action
+// and clear it in AfterEach to avoid contaminating other tests.
+var testReconciler *AgentDeploymentReconciler
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
-
 	RunSpecs(t, "Controller Suite")
 }
 
@@ -59,11 +71,16 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			// External CRDs vendored from upstream for integration testing.
+			// ServiceMonitor CRD sourced from prometheus-operator v0.75.0.
+			filepath.Join("..", "..", "config", "crd", "external"),
+		},
 		ErrorIfCRDPathMissing: true,
 
 		// The BinaryAssetsDirectory is only required if you want to run the tests directly
-		// without call the makefile target test. If not informed it will look for the
+		// without calling the makefile target test. If not informed it will look for the
 		// default path defined in controller-runtime which is /usr/local/kubebuilder/.
 		// Note that you must have the required binaries setup under the bin directory to perform
 		// the tests directly. When we run make test it will be setup and used automatically.
@@ -72,13 +89,19 @@ var _ = BeforeSuite(func() {
 	}
 
 	var err error
-	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	err = agentraxv1alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
+	// Register our CRD types and core Kubernetes types.
+	Expect(agentraxv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(appsv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(corev1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// Register prometheus-operator types so the reconciler can handle ServiceMonitor objects.
+	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// Register apiextensions types so serviceMonitorCRDExists can decode CRD objects
+	// when called from SetupWithManager via the uncached API reader.
+	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 
@@ -86,11 +109,32 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
+	// Start the controller manager so the reconciler runs during integration tests.
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+		// Disable the metrics server in tests to avoid port conflicts.
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	testReconciler = &AgentDeploymentReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
+
+	mgrDone = make(chan struct{})
+	go func() {
+		defer GinkgoRecover()
+		defer close(mgrDone)
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
 })
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	// Wait for the manager goroutine to finish before stopping envtest.
+	<-mgrDone
+	Expect(testEnv.Stop()).To(Succeed())
 })
