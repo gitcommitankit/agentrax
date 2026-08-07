@@ -53,11 +53,20 @@ var _ = Describe("TenantQuota Controller", func() {
 		adList := &agentraxv1alpha1.AgentDeploymentList{}
 		Expect(k8sClient.List(ctx, adList, inNamespace(tqNS))).To(Succeed())
 		for i := range adList.Items {
-			// Remove finalizer so deletion doesn't block.
 			ad := &adList.Items[i]
+			// Remove finalizer so deletion is not blocked by the controller.
 			ad.Finalizers = nil
-			_ = k8sClient.Update(ctx, ad)
-			_ = k8sClient.Delete(ctx, ad)
+			if err := k8sClient.Update(ctx, ad); err != nil && !apierrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred(), "removing finalizer from AD %s", ad.Name)
+			}
+			if err := k8sClient.Delete(ctx, ad); err != nil && !apierrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred(), "deleting AD %s", ad.Name)
+			}
+			// Wait until the API server confirms the object is gone.
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, namespacedName(ad.Name, tqNS), &agentraxv1alpha1.AgentDeployment{})
+				return apierrors.IsNotFound(err)
+			}, timeout, interval).Should(BeTrue(), "AD %s should be fully deleted", ad.Name)
 		}
 
 		By("deleting all TenantQuotas in the test namespace")
@@ -65,7 +74,9 @@ var _ = Describe("TenantQuota Controller", func() {
 		Expect(k8sClient.List(ctx, tqList, inNamespace(tqNS))).To(Succeed())
 		for i := range tqList.Items {
 			tq := &tqList.Items[i]
-			_ = k8sClient.Delete(ctx, tq)
+			if err := k8sClient.Delete(ctx, tq); err != nil && !apierrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred(), "deleting TQ %s", tq.Name)
+			}
 		}
 	})
 
@@ -213,6 +224,9 @@ var _ = Describe("TenantQuota Controller", func() {
 				// The reconciler calls RemoveStatusCondition, so the condition
 				// must be fully absent once usage normalises.
 				g.Expect(cond).To(BeNil())
+				// Usage counters must reflect the one remaining AD (maxReplicas=2).
+				g.Expect(f.Status.UsedAgents).To(BeNumerically("==", 1))
+				g.Expect(f.Status.UsedTotalReplicas).To(BeNumerically("==", 2))
 			}, timeout, interval).Should(Succeed())
 		})
 

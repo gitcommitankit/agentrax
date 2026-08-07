@@ -40,8 +40,10 @@ func TestParseErrorRate(t *testing.T) {
 		{"abc%", 0, true},
 		// trailing garbage — strconv.ParseFloat must reject these
 		{"5x%", 0, true},
-		// non-finite numeric input
+		// non-finite numeric input — caught by math.IsNaN / math.IsInf guard
 		{"NaN%", 0, true},
+		{"Inf%", 0, true},
+		{"-Inf%", 0, true},
 		// leading whitespace — strconv.ParseFloat must reject " 5"
 		{" 5%", 0, true},
 	}

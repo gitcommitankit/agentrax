@@ -129,8 +129,21 @@ func (e *Enforcer) extractGPUs(resources corev1.ResourceRequirements) int64 {
 // gpusForAD returns the total GPU units for one AgentDeployment:
 // gpuPerReplica × spec.replicas.max. The multiplication is performed in
 // int64 to prevent overflow, then clamped to the int32 range.
+// Fails closed (returns MaxInt32) on unexpected negative inputs or int64
+// overflow so the quota check rejects rather than under-counts.
 func (e *Enforcer) gpusForAD(ad agentraxv1alpha1.AgentDeploymentSpec) int32 {
 	perReplica := e.extractGPUs(ad.Resources)
+	// GPU quantities and replica counts must be non-negative. If either is
+	// negative (should never happen given CRD validation), fail closed.
+	if perReplica < 0 || ad.Replicas.Max < 0 {
+		return math.MaxInt32
+	}
+	// Detect int64 multiplication overflow before computing total.
+	// perReplica and Replicas.Max are both non-negative at this point, so
+	// overflow can only occur in the positive direction.
+	if perReplica > 0 && int64(ad.Replicas.Max) > math.MaxInt64/perReplica {
+		return math.MaxInt32
+	}
 	total := perReplica * int64(ad.Replicas.Max)
 	const maxInt32 = int64(math.MaxInt32)
 	if total > maxInt32 {
