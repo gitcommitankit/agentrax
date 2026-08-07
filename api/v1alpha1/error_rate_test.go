@@ -38,6 +38,12 @@ func TestParseErrorRate(t *testing.T) {
 		{"-1%", 0, true},
 		{"101%", 0, true},
 		{"abc%", 0, true},
+		// trailing garbage — strconv.ParseFloat must reject these
+		{"5x%", 0, true},
+		// non-finite numeric input
+		{"NaN%", 0, true},
+		// leading whitespace — strconv.ParseFloat must reject " 5"
+		{" 5%", 0, true},
 	}
 	for _, tc := range tests {
 		tc := tc

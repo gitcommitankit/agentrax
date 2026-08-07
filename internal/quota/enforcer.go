@@ -20,6 +20,7 @@ package quota
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -52,7 +53,9 @@ type Enforcer struct {
 	reservations map[string]*reservationEntry // keyed by "namespace/adName"
 
 	// done is closed by Stop() to terminate the background sweep goroutine.
-	done chan struct{}
+	// stopOnce ensures close(done) is called exactly once.
+	done     chan struct{}
+	stopOnce sync.Once
 
 	// nowFn is overridden in tests to control time.
 	nowFn func() time.Time
@@ -76,10 +79,10 @@ func NewEnforcer(gpuResourceName string) *Enforcer {
 	return e
 }
 
-// Stop terminates the background sweep goroutine. Call this when the Enforcer
-// is no longer needed (e.g. in test teardown) to avoid goroutine leaks.
+// Stop terminates the background sweep goroutine. It is idempotent; repeated
+// calls are safe and will not panic.
 func (e *Enforcer) Stop() {
-	close(e.done)
+	e.stopOnce.Do(func() { close(e.done) })
 }
 
 // sweepLoop removes expired in-flight reservations every second.
@@ -124,10 +127,16 @@ func (e *Enforcer) extractGPUs(resources corev1.ResourceRequirements) int64 {
 }
 
 // gpusForAD returns the total GPU units for one AgentDeployment:
-// gpuPerReplica × spec.replicas.max.
+// gpuPerReplica × spec.replicas.max. The multiplication is performed in
+// int64 to prevent overflow, then clamped to the int32 range.
 func (e *Enforcer) gpusForAD(ad agentraxv1alpha1.AgentDeploymentSpec) int32 {
 	perReplica := e.extractGPUs(ad.Resources)
-	return int32(perReplica) * ad.Replicas.Max
+	total := perReplica * int64(ad.Replicas.Max)
+	const maxInt32 = int64(math.MaxInt32)
+	if total > maxInt32 {
+		return math.MaxInt32
+	}
+	return int32(total)
 }
 
 // ComputeUsage aggregates resource usage across a slice of AgentDeployment specs

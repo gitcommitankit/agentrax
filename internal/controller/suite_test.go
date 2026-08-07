@@ -166,5 +166,7 @@ var _ = AfterSuite(func() {
 	cancel()
 	// Wait for the manager goroutine to finish before stopping envtest.
 	<-mgrDone
+	// Stop the shared enforcer's background sweep goroutine.
+	testEnforcer.Stop()
 	Expect(testEnv.Stop()).To(Succeed())
 })

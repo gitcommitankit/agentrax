@@ -16,7 +16,11 @@ limitations under the License.
 
 package v1alpha1
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+	"strconv"
+)
 
 // ParseErrorRate parses a percentage string like "2%" and returns the float64
 // value (e.g. 0.02 for "2%"). Returns an error if the format is invalid.
@@ -28,9 +32,16 @@ func ParseErrorRate(s string) (float64, error) {
 	if s[len(s)-1] != '%' {
 		return 0, fmt.Errorf("error rate must end with '%%': got %q", s)
 	}
-	var pct float64
-	if _, err := fmt.Sscanf(s[:len(s)-1], "%f", &pct); err != nil {
+	// strconv.ParseFloat rejects trailing garbage (e.g. "5x") and leading
+	// whitespace (e.g. " 5"), unlike fmt.Sscanf which silently ignores them.
+	pct, err := strconv.ParseFloat(s[:len(s)-1], 64)
+	if err != nil {
 		return 0, fmt.Errorf("parsing error rate %q: %w", s, err)
+	}
+	// Reject non-finite values (NaN, ±Inf) that ParseFloat may return for
+	// inputs like "NaN" or "Inf".
+	if math.IsNaN(pct) || math.IsInf(pct, 0) {
+		return 0, fmt.Errorf("error rate %q is not a finite number", s)
 	}
 	if pct < 0 || pct > 100 {
 		return 0, fmt.Errorf("error rate %q out of range [0, 100]", s)

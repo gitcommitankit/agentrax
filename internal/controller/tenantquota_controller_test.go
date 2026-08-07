@@ -210,10 +210,9 @@ var _ = Describe("TenantQuota Controller", func() {
 				f := &agentraxv1alpha1.TenantQuota{}
 				g.Expect(k8sClient.Get(ctx, namespacedName("tq-clearoq", tqNS), f)).To(Succeed())
 				cond := apimeta.FindStatusCondition(f.Status.Conditions, agentraxv1alpha1.ConditionOverQuota)
-				// Condition should be absent or False once usage normalises.
-				if cond != nil {
-					g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				}
+				// The reconciler calls RemoveStatusCondition, so the condition
+				// must be fully absent once usage normalises.
+				g.Expect(cond).To(BeNil())
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -263,6 +262,17 @@ var _ = Describe("TenantQuota Controller", func() {
 			// First AD is within quota → admitted.
 			ad1 := makeBasicAD("ad-reject-1", tqNS, "tq-reject", 2)
 			Expect(k8sClient.Create(ctx, ad1)).To(Succeed())
+
+			// Wait for the reconciler to commit ad1's usage into TQ status before
+			// testing ad2. Without this, ad2 may be tried while the in-flight
+			// reservation is still live and the quota arithmetic has not yet been
+			// persisted, causing the rejection to rely solely on the reservation
+			// TTL which may have already expired.
+			Eventually(func(g Gomega) {
+				f := &agentraxv1alpha1.TenantQuota{}
+				g.Expect(k8sClient.Get(ctx, namespacedName("tq-reject", tqNS), f)).To(Succeed())
+				g.Expect(f.Status.UsedAgents).To(BeNumerically("==", 1))
+			}, timeout, interval).Should(Succeed())
 
 			// Second AD would push usedAgents to 2 > maxAgents=1 → rejected.
 			ad2 := makeBasicAD("ad-reject-2", tqNS, "tq-reject", 2)

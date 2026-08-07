@@ -17,6 +17,7 @@ limitations under the License.
 package quota_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -156,7 +157,7 @@ func TestCanAdmit_Create(t *testing.T) {
 			if !tc.wantAdmit && tc.wantContain != "" {
 				if reason == "" {
 					t.Errorf("CanAdmit() denied but returned empty reason")
-				} else if !containsSubstring(reason, tc.wantContain) {
+				} else if !strings.Contains(reason, tc.wantContain) {
 					t.Errorf("CanAdmit() reason %q does not contain %q", reason, tc.wantContain)
 				}
 			}
@@ -222,7 +223,7 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 	if ok3 {
 		t.Errorf("update increasing replicas.max beyond maxReplicasPerAgent should be rejected; got reason: %q", reason3)
 	}
-	if !containsSubstring(reason3, "maxReplicasPerAgent") {
+	if !strings.Contains(reason3, "maxReplicasPerAgent") {
 		t.Errorf("denial reason %q should mention maxReplicasPerAgent", reason3)
 	}
 }
@@ -336,7 +337,7 @@ func TestIsOverQuota(t *testing.T) {
 			if over != tc.wantOQ {
 				t.Errorf("IsOverQuota() = %v, want %v; msg=%q", over, tc.wantOQ, msg)
 			}
-			if tc.wantOQ && !containsSubstring(msg, tc.wantMsg) {
+			if tc.wantOQ && !strings.Contains(msg, tc.wantMsg) {
 				t.Errorf("IsOverQuota() msg %q does not contain %q", msg, tc.wantMsg)
 			}
 		})
@@ -360,17 +361,6 @@ func TestParseErrorRate_ViaV1alpha1(t *testing.T) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func containsSubstring(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && func() bool {
-		for i := 0; i <= len(s)-len(sub); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
-		}
-		return false
-	}())
-}
 
 func absFloat(f float64) float64 {
 	if f < 0 {
