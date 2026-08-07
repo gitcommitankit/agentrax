@@ -44,7 +44,7 @@
 ### Serena (MCP — Semantic Code Intelligence)
 
 This project supports **Serena** configured as an MCP server.
-Serena exposes `gopls`-backed semantic tools via the Model Context Protocol.
+Serena exposes `gopls`-backed semantic tools via the Model Context Protocol. Note that Go and `gopls` must be installed and available on `PATH` before use.
 The project is indexed and the config lives at `.serena/project.yml`.
 
 **Configuration & Setup:**
