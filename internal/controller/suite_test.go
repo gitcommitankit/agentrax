@@ -37,10 +37,13 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/quota"
+	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -58,6 +61,10 @@ var mgrDone chan struct{}
 // Tests that need to inject a Deregister hook can set it before the action
 // and clear it in AfterEach to avoid contaminating other tests.
 var testReconciler *AgentDeploymentReconciler
+
+// testEnforcer is the shared quota Enforcer used by the TenantQuota reconciler
+// and the validating webhook in integration tests.
+var testEnforcer *quota.Enforcer
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -78,6 +85,12 @@ var _ = BeforeSuite(func() {
 			filepath.Join("..", "..", "config", "crd", "external"),
 		},
 		ErrorIfCRDPathMissing: true,
+
+		// Configure envtest to install and run the webhooks during integration
+		// tests. envtest generates self-signed TLS certs automatically.
+		WebhookInstallOptions: envtest.WebhookInstallOptions{
+			Paths: []string{filepath.Join("..", "..", "config", "webhook")},
+		},
 
 		// The BinaryAssetsDirectory is only required if you want to run the tests directly
 		// without calling the makefile target test. If not informed it will look for the
@@ -110,18 +123,35 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient).NotTo(BeNil())
 
 	// Start the controller manager so the reconciler runs during integration tests.
+	// Use envtest's webhook host/port so the manager's webhook server binds to the
+	// same address the webhook install options configured the API server to call.
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
 		// Disable the metrics server in tests to avoid port conflicts.
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Host:    testEnv.WebhookInstallOptions.LocalServingHost,
+			Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+			CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		}),
 	})
 	Expect(err).NotTo(HaveOccurred())
+
+	testEnforcer = quota.NewEnforcer(quota.DefaultGPUResourceName)
 
 	testReconciler = &AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
+
+	Expect((&TenantQuotaReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Enforcer: testEnforcer,
+	}).SetupWithManager(mgr)).To(Succeed())
+
+	Expect(agentraxwebhook.SetupAgentDeploymentWebhookWithManager(mgr, testEnforcer)).To(Succeed())
 
 	mgrDone = make(chan struct{})
 	go func() {
@@ -136,5 +166,7 @@ var _ = AfterSuite(func() {
 	cancel()
 	// Wait for the manager goroutine to finish before stopping envtest.
 	<-mgrDone
+	// Stop the shared enforcer's background sweep goroutine.
+	testEnforcer.Stop()
 	Expect(testEnv.Stop()).To(Succeed())
 })

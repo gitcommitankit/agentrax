@@ -38,6 +38,8 @@ import (
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/controller"
+	"github.com/gitcommitankit/agentrax/internal/quota"
+	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -59,6 +61,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var gpuResourceName string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -70,6 +73,8 @@ func main() {
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&gpuResourceName, "gpu-resource-name", quota.DefaultGPUResourceName,
+		"Kubernetes resource name used to count GPU units in AgentDeployment resource limits.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -145,6 +150,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Shared quota enforcer used by both the webhook validator and TenantQuota reconciler.
+	quotaEnforcer := quota.NewEnforcer(gpuResourceName)
+
 	if err = (&controller.AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -153,10 +161,15 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.TenantQuotaReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Enforcer: quotaEnforcer,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TenantQuota")
+		os.Exit(1)
+	}
+	if err = agentraxwebhook.SetupAgentDeploymentWebhookWithManager(mgr, quotaEnforcer); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "AgentDeployment")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
