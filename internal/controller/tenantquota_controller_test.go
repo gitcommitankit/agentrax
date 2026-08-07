@@ -310,15 +310,15 @@ var _ = Describe("TenantQuota Controller", func() {
 		})
 
 		It("defaults rollout.strategy to Recreate when omitted", func() {
-			tq := makeTQ("tq-strat-def", tqNS, 6, 0, 12, 6)
+			tq := makeTQ("tq-strategy-def", tqNS, 6, 0, 12, 6)
 			Expect(k8sClient.Create(ctx, tq)).To(Succeed())
 
-			ad := makeBasicAD("ad-strat-def", tqNS, "tq-strat-def", 2)
+			ad := makeBasicAD("ad-strategy-def", tqNS, "tq-strategy-def", 2)
 			ad.Spec.Rollout.Strategy = ""
 			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
 
 			fetched := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, namespacedName("ad-strat-def", tqNS), fetched)).To(Succeed())
+			Expect(k8sClient.Get(ctx, namespacedName("ad-strategy-def", tqNS), fetched)).To(Succeed())
 			Expect(fetched.Spec.Rollout.Strategy).To(Equal("Recreate"))
 		})
 	})
@@ -326,7 +326,7 @@ var _ = Describe("TenantQuota Controller", func() {
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
-func makeTQ(name, ns string, maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) *agentraxv1alpha1.TenantQuota {
+func makeTQ(name, ns string, maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) *agentraxv1alpha1.TenantQuota { //nolint:unparam
 	return &agentraxv1alpha1.TenantQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: agentraxv1alpha1.TenantQuotaSpec{
@@ -340,7 +340,7 @@ func makeTQ(name, ns string, maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPe
 
 // makeBasicAD builds a minimal AgentDeployment suitable for TQ reconciler tests.
 // It uses a real image name that won't pull (but pod scheduling isn't needed here).
-func makeBasicAD(name, ns, tenantRef string, maxReplicas int32) *agentraxv1alpha1.AgentDeployment {
+func makeBasicAD(name, ns, tenantRef string, maxReplicas int32) *agentraxv1alpha1.AgentDeployment { //nolint:unparam
 	return &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{

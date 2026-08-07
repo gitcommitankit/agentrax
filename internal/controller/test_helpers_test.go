@@ -33,7 +33,7 @@ const (
 )
 
 // namespacedName is a convenience wrapper for building types.NamespacedName.
-func namespacedName(name, namespace string) types.NamespacedName {
+func namespacedName(name, namespace string) types.NamespacedName { //nolint:unparam
 	return types.NamespacedName{Name: name, Namespace: namespace}
 }
 
