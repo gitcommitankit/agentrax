@@ -31,6 +31,7 @@ description: Project context and settled architecture decisions for the Agentrax
 | `internal/scaling/`    | HPA generation and quota-capped scaling logic.                                            |
 | `internal/registry/`   | MCP registrar, registry HTTP handler, TTL sweep.                                          |
 | `internal/quota/`      | Quota arithmetic and in-flight reservation. Shared by webhook and TenantQuota reconciler. |
+| `internal/webhook/`    | Validating and mutating admission webhooks. Lives here (not `api/`) to import `internal/quota` without creating an import cycle. |
 | `internal/metrics/`    | Shared Prometheus client plumbing used by rollout and scaling.                            |
 
 ## Where the hard logic lives

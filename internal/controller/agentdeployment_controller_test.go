@@ -44,9 +44,28 @@ const (
 	testNginxImage = "nginx:latest"
 )
 
+// ensureTenantQuota creates the TenantQuota "team-test" in the given namespace
+// if it does not already exist. Phase 2 webhooks require spec.tenantRef to
+// resolve to a real TenantQuota before admitting an AgentDeployment.
+func ensureTenantQuota(namespace string) {
+	tq := &agentraxv1alpha1.TenantQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-test", Namespace: namespace},
+		Spec: agentraxv1alpha1.TenantQuotaSpec{
+			MaxAgents:           100,
+			MaxGPUs:             0,
+			MaxTotalReplicas:    300,
+			MaxReplicasPerAgent: 10,
+		},
+	}
+	err := k8sClient.Create(ctx, tq)
+	Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue(),
+		"ensuring TenantQuota team-test in %s: %v", namespace, err)
+}
+
 // createAgentDeployment is a test helper that creates a minimal AgentDeployment
 // and returns its NamespacedName.
 func createAgentDeployment(name, namespace, image string, port, minReplicas int32) types.NamespacedName {
+	ensureTenantQuota(namespace)
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -647,6 +666,7 @@ var _ = Describe("AgentDeployment Controller", func() {
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-env-args"}}
 			err := k8sClient.Create(ctx, ns)
 			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue(), "creating namespace test-env-args: %v", err)
+			ensureTenantQuota("test-env-args")
 
 			ad := &agentraxv1alpha1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
