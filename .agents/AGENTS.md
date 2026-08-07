@@ -38,3 +38,30 @@
 
 4. **Update Docs on Architecture Changes**:
    - When an architecture boundary or CRD field changes, update `docs/agentrax.md` and `.agents/skills/agentrax-context/SKILL.md` in the same commit.
+
+## Tooling & Developer Environment
+
+### Serena (MCP — Semantic Code Intelligence)
+
+This project supports **Serena** configured as an MCP server.
+Serena exposes `gopls`-backed semantic tools via the Model Context Protocol. Note that Go and `gopls` must be installed and available on `PATH` before use.
+The project is indexed and the config lives at `.serena/project.yml`.
+
+**Configuration & Setup:**
+Configure your MCP client with `--project-from-cwd` (for example, `serena start-mcp-server --project-from-cwd`). Serena will automatically select the project root by finding the nearest `.serena/project.yml` or `.git` boundary.
+
+**Use Serena tools instead of text search for the following tasks:**
+
+| Task | Use instead of |
+| ---- | -------------- |
+| Find where a type, function, or constant is defined | `find_symbol` / `find_declaration` rather than `grep` |
+| Find all usages/call sites of a symbol across packages | `find_referencing_symbols` rather than `grep -r` |
+| Understand what symbols a file or package exports | `get_symbols_overview` rather than skimming the file |
+| Rename a symbol consistently across all packages | `rename_symbol` rather than manual multi-file sed |
+| Navigate to where an interface is implemented | `find_implementations` rather than text search |
+| Check diagnostics/type errors before proposing a fix | `get_diagnostics_for_file` |
+
+**When NOT to use Serena:**
+- Simple single-file reads — `view_file` is faster.
+- Writing or replacing file content — use the standard edit tools.
+- Searching for plain string literals (log messages, YAML values) — `grep` is fine.
