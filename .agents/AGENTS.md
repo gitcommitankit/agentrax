@@ -43,9 +43,12 @@
 
 ### Serena (MCP — Semantic Code Intelligence)
 
-This project has **Serena** configured as an MCP server (registered in `~/.gemini/config/mcp_config.json`).
+This project supports **Serena** configured as an MCP server.
 Serena exposes `gopls`-backed semantic tools via the Model Context Protocol.
 The project is indexed and the config lives at `.serena/project.yml`.
+
+**Configuration & Setup:**
+Configure your MCP client with `--project-from-cwd` (for example, `serena start-mcp-server --project-from-cwd`). Serena will automatically select the project root by finding the nearest `.serena/project.yml` or `.git` boundary.
 
 **Use Serena tools instead of text search for the following tasks:**
 
@@ -62,5 +65,3 @@ The project is indexed and the config lives at `.serena/project.yml`.
 - Simple single-file reads — `view_file` is faster.
 - Writing or replacing file content — use the standard edit tools.
 - Searching for plain string literals (log messages, YAML values) — `grep` is fine.
-
-**Activation:** Serena auto-detects the project when the working directory is (or is under) `/home/ankit/workspace/my-projects/agentrax` via the `--project-from-cwd` flag. No manual project activation is needed.
