@@ -52,6 +52,7 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// init registers all Kubernetes core, CRD, and monitoring schemes.
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
@@ -62,6 +63,7 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// main is the entrypoint for the Agentrax controller manager binary.
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool

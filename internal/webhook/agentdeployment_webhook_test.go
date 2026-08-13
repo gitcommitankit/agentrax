@@ -33,6 +33,7 @@ func newDefaulter() *agentraxwebhook.AgentDeploymentCustomDefaulter {
 	return &agentraxwebhook.AgentDeploymentCustomDefaulter{}
 }
 
+// baseAD returns a minimal AgentDeployment fixture for defaulter testing.
 func baseAD() *agentraxv1alpha1.AgentDeployment {
 	return &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ad", Namespace: "test-ns"},
@@ -44,6 +45,7 @@ func baseAD() *agentraxv1alpha1.AgentDeployment {
 	}
 }
 
+// TestDefaulter_PortDefaulted verifies that port defaults to 8080 when unset.
 func TestDefaulter_PortDefaulted(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -55,6 +57,7 @@ func TestDefaulter_PortDefaulted(t *testing.T) {
 	}
 }
 
+// TestDefaulter_PortNotOverwritten verifies that an explicit port is preserved.
 func TestDefaulter_PortNotOverwritten(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -67,6 +70,7 @@ func TestDefaulter_PortNotOverwritten(t *testing.T) {
 	}
 }
 
+// TestDefaulter_StrategyDefaulted verifies that rollout strategy defaults to Recreate when unset.
 func TestDefaulter_StrategyDefaulted(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -78,6 +82,7 @@ func TestDefaulter_StrategyDefaulted(t *testing.T) {
 	}
 }
 
+// TestDefaulter_StrategyNotOverwritten verifies that explicit rollout strategy is preserved.
 func TestDefaulter_StrategyNotOverwritten(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -90,6 +95,7 @@ func TestDefaulter_StrategyNotOverwritten(t *testing.T) {
 	}
 }
 
+// TestDefaulter_ResourcesDefaulted verifies that default CPU/memory requests and limits are populated when unset.
 func TestDefaulter_ResourcesDefaulted(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -109,6 +115,7 @@ func TestDefaulter_ResourcesDefaulted(t *testing.T) {
 	}
 }
 
+// TestDefaulter_ResourcesNotOverwritten verifies that explicitly specified resource requirements are preserved.
 func TestDefaulter_ResourcesNotOverwritten(t *testing.T) {
 	t.Parallel()
 	ad := baseAD()
@@ -126,6 +133,7 @@ func TestDefaulter_ResourcesNotOverwritten(t *testing.T) {
 	}
 }
 
+// TestDefaulter_WrongType verifies that passing an unexpected runtime object type returns an error.
 func TestDefaulter_WrongType(t *testing.T) {
 	t.Parallel()
 	d := newDefaulter()

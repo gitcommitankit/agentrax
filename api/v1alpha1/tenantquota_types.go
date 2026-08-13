@@ -86,6 +86,7 @@ type TenantQuotaList struct {
 	Items           []TenantQuota `json:"items"`
 }
 
+// init registers TenantQuota and TenantQuotaList types with the SchemeBuilder.
 func init() {
 	SchemeBuilder.Register(&TenantQuota{}, &TenantQuotaList{})
 }

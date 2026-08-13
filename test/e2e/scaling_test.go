@@ -266,12 +266,12 @@ func kubectlApplyStdin(yaml string) error {
 	return err
 }
 
-// stringReader wraps a string as an io.Reader for exec.Cmd.Stdin.
+// stringReader wraps a string as an io.Reader for test inputs.
 func stringReader(s string) *bytesReaderWrapper {
 	return &bytesReaderWrapper{data: []byte(s), pos: 0}
 }
 
-// bytesReader wraps a byte slice as an io.Reader for exec.Cmd.Stdin.
+// bytesReader wraps a byte slice as an io.Reader for test inputs.
 func bytesReader(b []byte) *bytesReaderWrapper {
 	return &bytesReaderWrapper{data: b, pos: 0}
 }
@@ -282,6 +282,7 @@ type bytesReaderWrapper struct {
 	pos  int
 }
 
+// Read implements io.Reader for bytesReaderWrapper.
 func (r *bytesReaderWrapper) Read(p []byte) (n int, err error) {
 	if r.pos >= len(r.data) {
 		return 0, io.EOF

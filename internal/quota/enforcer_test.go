@@ -35,6 +35,7 @@ import (
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+// makeSpec creates an AgentDeploymentSpec test fixture with given maxReplicas and GPU limit.
 func makeSpec(maxReplicas int32, gpuLimit string) agentraxv1alpha1.AgentDeploymentSpec {
 	spec := agentraxv1alpha1.AgentDeploymentSpec{
 		Image:     "test-image:v1",
@@ -56,6 +57,7 @@ func makeSpec(maxReplicas int32, gpuLimit string) agentraxv1alpha1.AgentDeployme
 	return spec
 }
 
+// makeQuota creates a TenantQuotaSpec test fixture with given quota limits.
 func makeQuota(maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) agentraxv1alpha1.TenantQuotaSpec {
 	return agentraxv1alpha1.TenantQuotaSpec{
 		MaxAgents:           maxAgents,
@@ -65,6 +67,7 @@ func makeQuota(maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) 
 	}
 }
 
+// makeUsage creates a TenantQuotaStatus test fixture with given observed usage.
 func makeUsage(agents, gpus, replicas int32) agentraxv1alpha1.TenantQuotaStatus {
 	return agentraxv1alpha1.TenantQuotaStatus{
 		UsedAgents:        agents,
@@ -84,6 +87,7 @@ func newTestEnforcer(t *testing.T) *Enforcer {
 
 // ── canAdmit tests ────────────────────────────────────────────────────────────
 
+// TestCanAdmit_Create verifies admission decisions for new AgentDeployment creates against various quota scenarios.
 func TestCanAdmit_Create(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -170,6 +174,7 @@ func TestCanAdmit_Create(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update verifies admission decisions when updating existing AgentDeployment specs.
 func TestCanAdmit_Update(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -197,6 +202,7 @@ func TestCanAdmit_Update(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade verifies that lowering maxReplicasPerAgent does not deadlock updates that do not increase replicas.
 func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 	// When maxReplicasPerAgent is lowered below an existing AD's replicas.max,
 	// updates that do NOT further increase replicas.max must still be allowed.
@@ -235,6 +241,7 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 
 // ── In-flight reservation tests ───────────────────────────────────────────────
 
+// TestReservation_BlocksConcurrentCreate verifies that an in-flight reservation blocks concurrent creation of the same remaining slot.
 func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -265,6 +272,7 @@ func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	}
 }
 
+// TestReservation_DoesNotDoubleCount verifies that re-admission for the same AD key excludes its own prior reservation.
 func TestReservation_DoesNotDoubleCount(t *testing.T) {
 	// A re-admission for the same AD key should exclude its own prior reservation
 	// so it isn't double-counted.
@@ -398,6 +406,7 @@ func TestAdmitAndReserve_AtomicRaceProtection(t *testing.T) {
 
 // ── ComputeUsage tests ────────────────────────────────────────────────────────
 
+// TestComputeUsage verifies aggregation of agents, GPUs, and replicas across multiple AgentDeployment specs.
 func TestComputeUsage(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -418,6 +427,7 @@ func TestComputeUsage(t *testing.T) {
 	}
 }
 
+// TestComputeUsage_Empty verifies that empty input returns all-zero usage.
 func TestComputeUsage_Empty(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -429,6 +439,7 @@ func TestComputeUsage_Empty(t *testing.T) {
 
 // ── IsOverQuota tests ─────────────────────────────────────────────────────────
 
+// TestIsOverQuota verifies over-quota condition detection across agents, GPUs, and replicas dimensions.
 func TestIsOverQuota(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -464,6 +475,7 @@ func TestIsOverQuota(t *testing.T) {
 // ParseErrorRate lives in api/v1alpha1 to avoid an import cycle.
 // Its tests are in api/v1alpha1/webhook_test.go.
 
+// TestParseErrorRate_ViaV1alpha1 verifies ParseErrorRate is accessible and correct from outside api/v1alpha1.
 func TestParseErrorRate_ViaV1alpha1(t *testing.T) {
 	// Smoke-test that ParseErrorRate is accessible from outside api/v1alpha1.
 	t.Parallel()
@@ -478,6 +490,7 @@ func TestParseErrorRate_ViaV1alpha1(t *testing.T) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// absFloat returns the absolute value of a float64.
 func absFloat(f float64) float64 {
 	if f < 0 {
 		return -f

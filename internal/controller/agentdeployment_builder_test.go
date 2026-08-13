@@ -62,6 +62,7 @@ func makeAD(name, image string, port int32, minReplicas int32) *agentraxv1alpha1
 
 // ── desiredDeployment ─────────────────────────────────────────────────────────
 
+// TestDesiredDeployment_Image verifies that the desired Deployment container image matches spec.image.
 func TestDesiredDeployment_Image(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD("my-agent", "registry.io/agent:v1", 8080, 1)
@@ -72,6 +73,7 @@ func TestDesiredDeployment_Image(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_Port verifies container port configuration and default fallback.
 func TestDesiredDeployment_Port(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -94,6 +96,7 @@ func TestDesiredDeployment_Port(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_Replicas verifies that desired Deployment replicas match spec.replicas.min.
 func TestDesiredDeployment_Replicas(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 3)
@@ -104,6 +107,7 @@ func TestDesiredDeployment_Replicas(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_EnvAndArgs verifies propagation of environment variables and container arguments.
 func TestDesiredDeployment_EnvAndArgs(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 1)
@@ -121,6 +125,7 @@ func TestDesiredDeployment_EnvAndArgs(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_Resources verifies container CPU and Memory resource requests/limits propagation.
 func TestDesiredDeployment_Resources(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 1)
@@ -153,6 +158,7 @@ func TestDesiredDeployment_Resources(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_Labels verifies required standard labels on Deployment and Pod template.
 func TestDesiredDeployment_Labels(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testAgentName, testDefaultImage, 8080, 1)
@@ -173,6 +179,7 @@ func TestDesiredDeployment_Labels(t *testing.T) {
 	}
 }
 
+// TestDesiredDeployment_SelectorMatchesPodLabels verifies Deployment selector matches Pod template labels.
 func TestDesiredDeployment_SelectorMatchesPodLabels(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 1)
@@ -187,6 +194,7 @@ func TestDesiredDeployment_SelectorMatchesPodLabels(t *testing.T) {
 
 // ── desiredService ────────────────────────────────────────────────────────────
 
+// TestDesiredService_Port verifies Service port configuration and default fallback.
 func TestDesiredService_Port(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -208,6 +216,7 @@ func TestDesiredService_Port(t *testing.T) {
 	}
 }
 
+// TestDesiredService_Selector verifies Service selector targets the agent pod label.
 func TestDesiredService_Selector(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testAgentName, testDefaultImage, 8080, 1)
@@ -218,6 +227,7 @@ func TestDesiredService_Selector(t *testing.T) {
 	}
 }
 
+// TestDesiredService_ClusterIPType verifies that the created Service is of type ClusterIP.
 func TestDesiredService_ClusterIPType(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 1)
@@ -230,6 +240,7 @@ func TestDesiredService_ClusterIPType(t *testing.T) {
 
 // ── agentLabels ───────────────────────────────────────────────────────────────
 
+// TestAgentLabels verifies standard label generation for an AgentDeployment.
 func TestAgentLabels(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
@@ -251,6 +262,7 @@ func TestAgentLabels(t *testing.T) {
 
 // ── condition helpers ─────────────────────────────────────────────────────────
 
+// TestSetAndGetCondition verifies setting and reading status conditions on AgentDeployment.
 func TestSetAndGetCondition(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{}
 
@@ -268,6 +280,7 @@ func TestSetAndGetCondition(t *testing.T) {
 	}
 }
 
+// TestSetCondition_Overwrite verifies that updating an existing condition updates in-place without duplicates.
 func TestSetCondition_Overwrite(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{}
 
@@ -284,6 +297,7 @@ func TestSetCondition_Overwrite(t *testing.T) {
 	}
 }
 
+// TestRemoveCondition verifies condition removal from the status condition slice.
 func TestRemoveCondition(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{}
 
@@ -300,6 +314,7 @@ func TestRemoveCondition(t *testing.T) {
 	}
 }
 
+// TestRemoveCondition_NonExistent verifies that removing a non-existent condition is a safe no-op.
 func TestRemoveCondition_NonExistent(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{}
 	// Should be a no-op, not panic.
@@ -309,6 +324,7 @@ func TestRemoveCondition_NonExistent(t *testing.T) {
 	}
 }
 
+// TestGetCondition_Absent verifies that querying an un-set condition returns nil.
 func TestGetCondition_Absent(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{}
 	c := GetCondition(ad, agentraxv1alpha1.ConditionReady)
@@ -319,6 +335,7 @@ func TestGetCondition_Absent(t *testing.T) {
 
 // ── desiredServiceMonitor ─────────────────────────────────────────────────────
 
+// TestDesiredServiceMonitor_Endpoint verifies ServiceMonitor metrics endpoint configuration.
 func TestDesiredServiceMonitor_Endpoint(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testDefaultAgent, testDefaultImage, 8080, 1)
@@ -336,6 +353,7 @@ func TestDesiredServiceMonitor_Endpoint(t *testing.T) {
 	}
 }
 
+// TestDesiredServiceMonitor_SelectorMatchesLabels verifies ServiceMonitor selector matches agent labels.
 func TestDesiredServiceMonitor_SelectorMatchesLabels(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
 	ad := makeAD(testAgentName, testDefaultImage, 8080, 1)

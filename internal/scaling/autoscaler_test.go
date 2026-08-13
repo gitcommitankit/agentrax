@@ -61,6 +61,7 @@ func makeTQSpec(maxTotalReplicas, maxReplicasPerAgent int32) agentraxv1alpha1.Te
 
 // ── BuildHPA tests ────────────────────────────────────────────────────────────
 
+// TestBuildHPA_MinMaxReplicas verifies that HPA MinReplicas and MaxReplicas are set directly when headroom exceeds spec.replicas.max.
 func TestBuildHPA_MinMaxReplicas(t *testing.T) {
 	t.Parallel()
 
@@ -75,6 +76,7 @@ func TestBuildHPA_MinMaxReplicas(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_QuotaCapApplied verifies that HPA MaxReplicas is capped at quota headroom when headroom is less than spec.replicas.max.
 func TestBuildHPA_QuotaCapApplied(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +88,7 @@ func TestBuildHPA_QuotaCapApplied(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_QuotaCapNotApplied verifies that HPA MaxReplicas is not capped when headroom equals spec.replicas.max.
 func TestBuildHPA_QuotaCapNotApplied(t *testing.T) {
 	t.Parallel()
 
@@ -97,6 +100,7 @@ func TestBuildHPA_QuotaCapNotApplied(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_QuotaHeadroomBelowMin verifies that MaxReplicas is clamped to MinReplicas when headroom is zero.
 func TestBuildHPA_QuotaHeadroomBelowMin(t *testing.T) {
 	t.Parallel()
 
@@ -114,6 +118,7 @@ func TestBuildHPA_QuotaHeadroomBelowMin(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_ScaleTargetRef verifies that ScaleTargetRef points to the agent Deployment apps/v1.
 func TestBuildHPA_ScaleTargetRef(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +137,7 @@ func TestBuildHPA_ScaleTargetRef(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_MetricQueueDepth verifies External metric configuration for queueDepth metric.
 func TestBuildHPA_MetricQueueDepth(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +147,7 @@ func TestBuildHPA_MetricQueueDepth(t *testing.T) {
 	requireExternalMetricName(t, hpa, customMetricQueueDepth)
 }
 
+// TestBuildHPA_MetricGPUUtilization verifies External metric configuration for gpuUtilization metric.
 func TestBuildHPA_MetricGPUUtilization(t *testing.T) {
 	t.Parallel()
 
@@ -150,6 +157,7 @@ func TestBuildHPA_MetricGPUUtilization(t *testing.T) {
 	requireExternalMetricName(t, hpa, customMetricGPUUtilization)
 }
 
+// TestBuildHPA_MetricUnknownDefaultsToQueueDepth verifies fallback to queueDepth for unrecognized metric names.
 func TestBuildHPA_MetricUnknownDefaultsToQueueDepth(t *testing.T) {
 	t.Parallel()
 
@@ -162,6 +170,7 @@ func TestBuildHPA_MetricUnknownDefaultsToQueueDepth(t *testing.T) {
 	requireExternalMetricName(t, hpa, customMetricQueueDepth)
 }
 
+// TestBuildHPA_TargetAverageValue verifies external metric target AverageValue quantity configuration.
 func TestBuildHPA_TargetAverageValue(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +194,7 @@ func TestBuildHPA_TargetAverageValue(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_StabilizationWindows verifies scale-up and scale-down stabilization window behavior.
 func TestBuildHPA_StabilizationWindows(t *testing.T) {
 	t.Parallel()
 
@@ -209,6 +219,7 @@ func TestBuildHPA_StabilizationWindows(t *testing.T) {
 	}
 }
 
+// TestBuildHPA_LabelsAndNamespace verifies HPA metadata names, namespaces, and tenant labels.
 func TestBuildHPA_LabelsAndNamespace(t *testing.T) {
 	t.Parallel()
 
@@ -228,6 +239,7 @@ func TestBuildHPA_LabelsAndNamespace(t *testing.T) {
 
 // ── IsQuotaCapped tests ───────────────────────────────────────────────────────
 
+// TestIsQuotaCapped_WhenCapped verifies IsQuotaCapped returns true when headroom is less than spec.replicas.max.
 func TestIsQuotaCapped_WhenCapped(t *testing.T) {
 	t.Parallel()
 
@@ -237,6 +249,7 @@ func TestIsQuotaCapped_WhenCapped(t *testing.T) {
 	}
 }
 
+// TestIsQuotaCapped_WhenExact verifies IsQuotaCapped returns false when headroom equals spec.replicas.max.
 func TestIsQuotaCapped_WhenExact(t *testing.T) {
 	t.Parallel()
 
@@ -246,6 +259,7 @@ func TestIsQuotaCapped_WhenExact(t *testing.T) {
 	}
 }
 
+// TestIsQuotaCapped_WhenNotCapped verifies IsQuotaCapped returns false when headroom exceeds spec.replicas.max.
 func TestIsQuotaCapped_WhenNotCapped(t *testing.T) {
 	t.Parallel()
 
@@ -257,6 +271,7 @@ func TestIsQuotaCapped_WhenNotCapped(t *testing.T) {
 
 // ── QuotaHeadroom tests ───────────────────────────────────────────────────────
 
+// TestQuotaHeadroom_PerAgentCeilingLimits verifies QuotaHeadroom respects maxReplicasPerAgent.
 func TestQuotaHeadroom_PerAgentCeilingLimits(t *testing.T) {
 	t.Parallel()
 
@@ -270,6 +285,7 @@ func TestQuotaHeadroom_PerAgentCeilingLimits(t *testing.T) {
 	}
 }
 
+// TestQuotaHeadroom_TotalBudgetLimits verifies QuotaHeadroom respects remaining total replica budget.
 func TestQuotaHeadroom_TotalBudgetLimits(t *testing.T) {
 	t.Parallel()
 
@@ -284,6 +300,7 @@ func TestQuotaHeadroom_TotalBudgetLimits(t *testing.T) {
 	}
 }
 
+// TestQuotaHeadroom_ZeroBudgetReturnsZero verifies QuotaHeadroom returns 0 when total budget is exhausted.
 func TestQuotaHeadroom_ZeroBudgetReturnsZero(t *testing.T) {
 	t.Parallel()
 
@@ -299,6 +316,7 @@ func TestQuotaHeadroom_ZeroBudgetReturnsZero(t *testing.T) {
 	}
 }
 
+// TestQuotaHeadroom_NegativeUsedByOthers verifies QuotaHeadroom clamps over-consumed budget to 0.
 func TestQuotaHeadroom_NegativeUsedByOthers(t *testing.T) {
 	t.Parallel()
 

@@ -67,6 +67,7 @@ var testReconciler *AgentDeploymentReconciler
 // and the validating webhook in integration tests.
 var testEnforcer *quota.Enforcer
 
+// TestControllers is the Ginkgo test suite runner for controller integration tests.
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Controller Suite")

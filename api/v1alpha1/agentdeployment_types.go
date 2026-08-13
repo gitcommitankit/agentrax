@@ -234,6 +234,7 @@ type AgentDeploymentList struct {
 	Items           []AgentDeployment `json:"items"`
 }
 
+// init registers AgentDeployment and AgentDeploymentList types with the SchemeBuilder.
 func init() {
 	SchemeBuilder.Register(&AgentDeployment{}, &AgentDeploymentList{})
 }
