@@ -44,6 +44,27 @@ import (
 	"github.com/gitcommitankit/agentrax/internal/scaling"
 )
 
+// quotaState is the outcome of reconcileHPA's quota evaluation, used by
+// updateStatus to apply the correct QuotaLimited condition without relying on
+// a bool that cannot distinguish between "not capped" and "not evaluated".
+type quotaState int
+
+const (
+	// quotaStateUncapped means HPA was reconciled and quota headroom was sufficient.
+	// updateStatus will clear the QuotaLimited condition.
+	quotaStateUncapped quotaState = iota
+	// quotaStateCapped means HPA was reconciled but maxReplicas was capped by quota.
+	// updateStatus will set QuotaLimited=True with reason HPAMaxReplicasCapped.
+	quotaStateCapped
+	// quotaStateUnknown means quota could not be evaluated (e.g., TenantQuota not found).
+	// updateStatus will set QuotaLimited=True with reason TenantQuotaNotFound.
+	quotaStateUnknown
+	// quotaStateSkipped means HPA reconciliation was skipped (canary rollout in progress).
+	// updateStatus must NOT touch the QuotaLimited condition so a pre-canary
+	// capped state is neither erroneously cleared nor re-set.
+	quotaStateSkipped
+)
+
 // AgentDeploymentReconciler reconciles an AgentDeployment object.
 type AgentDeploymentReconciler struct {
 	client.Client
@@ -147,9 +168,9 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// 6. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
-	// reconcileHPA also returns the quota-capped state so updateStatus can
-	// write the QuotaLimited condition onto the freshly re-fetched object.
-	hpaResult, quotaCapped, err := r.reconcileHPA(ctx, ad)
+	// reconcileHPA also returns the quota evaluation state so updateStatus can
+	// write the correct QuotaLimited condition onto the freshly re-fetched object.
+	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
 	}
@@ -158,7 +179,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// We continue into updateStatus even when hpaResult requests a requeue so
 	// that the QuotaLimited condition is written in the same reconcile cycle.
 	// Return the shorter of the two requeue intervals.
-	statusResult, err := r.updateStatus(ctx, ad, logger, quotaCapped)
+	statusResult, err := r.updateStatus(ctx, ad, logger, qs)
 	if err != nil {
 		return statusResult, err
 	}
@@ -288,15 +309,14 @@ func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context,
 
 // reconcileHPA creates or updates the HorizontalPodAutoscaler owned by this
 // AgentDeployment. It is skipped when a canary rollout is in progress because
-// Phase 4 owns the HPA lifecycle during rollout (deletes it, recreates it on
-// promote/rollback). The HPA's maxReplicas is capped at the tenant quota
-// headroom; when capping occurs the returned quotaCapped bool is true so the
-// caller can surface a QuotaLimited condition on the freshly re-fetched status.
-func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (ctrl.Result, bool, error) {
-	// Phase 4 owns the HPA when a canary rollout is in progress. We must not
-	// re-create or update the HPA here while Phase 4 has deliberately deleted it.
+// Phase 4 owns the HPA lifecycle during rollout. The HPA's maxReplicas is
+// capped at the tenant quota headroom; the returned quotaState tells the caller
+// which QuotaLimited condition (if any) to apply to status.
+func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (ctrl.Result, quotaState, error) {
+	// Phase 4 owns the HPA when a canary rollout is in progress. Signal
+	// quotaStateSkipped so updateStatus does not touch the QuotaLimited condition.
 	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress {
-		return ctrl.Result{}, false, nil
+		return ctrl.Result{}, quotaStateSkipped, nil
 	}
 
 	// Fetch the TenantQuota to compute quota headroom.
@@ -305,18 +325,19 @@ func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentr
 		if apierrors.IsNotFound(err) {
 			// TenantQuota missing — the webhook prevents this on create, but it
 			// can happen if the TenantQuota is deleted while agents exist.
-			// Signal capped=true so updateStatus sets QuotaLimited; do NOT return
-			// an error so updateStatus still runs and the condition is written.
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, true, nil
+			// Signal quotaStateUnknown so updateStatus sets QuotaLimited with a
+			// TenantQuotaNotFound reason (not the "HPA capped" reason).
+			// Do NOT return an error so updateStatus still runs this cycle.
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, quotaStateUnknown, nil
 		}
-		return ctrl.Result{}, false, fmt.Errorf("fetching TenantQuota %q: %w", ad.Spec.TenantRef, err)
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("fetching TenantQuota %q: %w", ad.Spec.TenantRef, err)
 	}
 
 	// Compute how many replicas the other agents in this tenant already consume
 	// so QuotaHeadroom accounts for the full tenant budget.
 	usedByOthers, err := r.replicasUsedByOtherAgents(ctx, ad)
 	if err != nil {
-		return ctrl.Result{}, false, fmt.Errorf("computing replica usage for quota headroom: %w", err)
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("computing replica usage for quota headroom: %w", err)
 	}
 
 	headroom := scaling.QuotaHeadroom(tq.Spec, ad.Spec, usedByOthers)
@@ -325,7 +346,7 @@ func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentr
 	// Set controller owner reference before CreateOrUpdate so garbage collection
 	// removes the HPA when the AgentDeployment is deleted.
 	if err := controllerutil.SetControllerReference(ad, desiredHPA, r.Scheme); err != nil {
-		return ctrl.Result{}, false, fmt.Errorf("setting HPA owner reference: %w", err)
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("setting HPA owner reference: %w", err)
 	}
 
 	existing := &autoscalingv2.HorizontalPodAutoscaler{}
@@ -346,10 +367,13 @@ func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentr
 		return nil
 	})
 	if err != nil {
-		return ctrl.Result{}, false, fmt.Errorf("creating/updating HPA: %w", err)
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("creating/updating HPA: %w", err)
 	}
 
-	return ctrl.Result{}, scaling.IsQuotaCapped(ad, headroom), nil
+	if scaling.IsQuotaCapped(ad, headroom) {
+		return ctrl.Result{}, quotaStateCapped, nil
+	}
+	return ctrl.Result{}, quotaStateUncapped, nil
 }
 
 // replicasUsedByOtherAgents returns the sum of spec.replicas.max across all
@@ -384,10 +408,11 @@ func (r *AgentDeploymentReconciler) replicasUsedByOtherAgents(ctx context.Contex
 }
 
 // updateStatus derives the AgentDeployment status from the live Deployment and writes it.
-// quotaCapped indicates whether reconcileHPA determined the HPA was capped by quota;
-// the corresponding QuotaLimited condition is applied to the freshly re-fetched object
-// here so it is never silently discarded. This is always the last step in the reconcile loop.
-func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment, logger logr.Logger, quotaCapped bool) (ctrl.Result, error) {
+// qs is the quota evaluation outcome from reconcileHPA; the QuotaLimited condition
+// is applied to the freshly re-fetched object here so it is never silently discarded.
+// quotaStateSkipped means the condition must not be modified (canary in progress).
+// This is always the last step in the reconcile loop.
+func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment, logger logr.Logger, qs quotaState) (ctrl.Result, error) {
 	// Re-fetch the live Deployment to get accurate replica counts.
 	dep := &appsv1.Deployment{}
 	depKey := client.ObjectKey{Name: ad.Name, Namespace: ad.Namespace}
@@ -419,13 +444,23 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 	// Apply the QuotaLimited condition from reconcileHPA onto the freshly
 	// re-fetched object. This must happen before the DeepEqual check so the
 	// condition is written in the same API call as the rest of the status.
-	if quotaCapped {
+	// quotaStateSkipped means HPA reconciliation was bypassed (canary in progress)
+	// — the existing condition must be left untouched.
+	switch qs {
+	case quotaStateCapped:
 		SetCondition(latest, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
 			"HPAMaxReplicasCapped",
 			fmt.Sprintf("spec.replicas.max (%d) exceeds quota headroom; HPA capped",
 				latest.Spec.Replicas.Max))
-	} else {
+	case quotaStateUnknown:
+		SetCondition(latest, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
+			"TenantQuotaNotFound",
+			fmt.Sprintf("TenantQuota %q not found in namespace %s; requeuing",
+				latest.Spec.TenantRef, latest.Namespace))
+	case quotaStateUncapped:
 		RemoveCondition(latest, agentraxv1alpha1.ConditionQuotaLimited)
+	default:
+		// quotaStateSkipped (canary in progress): leave the existing condition as-is.
 	}
 
 	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas

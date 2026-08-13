@@ -943,15 +943,16 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			}, testTimeout, testInterval).Should(Equal(int32(5)))
 
 			// Verify QuotaLimited condition is NOT True — max=5 is within headroom of 10.
-			Eventually(func() bool {
+			// Use Consistently so a transient True that later settles does not go undetected.
+			Consistently(func() bool {
 				latest := &agentraxv1alpha1.AgentDeployment{}
 				if err := k8sClient.Get(ctx, key, latest); err != nil {
-					return true // retry
+					return false // treat Get error as not-True; outer Eventually guards timing
 				}
 				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
 				return c != nil && c.Status == metav1.ConditionTrue
-			}, testTimeout, testInterval).Should(BeFalse(),
-				"QuotaLimited should not be True when max (5) <= headroom (10)")
+			}, 3*time.Second, testInterval).Should(BeFalse(),
+				"QuotaLimited should never be True when max (5) <= headroom (10)")
 		})
 	})
 

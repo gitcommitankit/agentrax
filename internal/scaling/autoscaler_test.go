@@ -284,17 +284,18 @@ func TestQuotaHeadroom_TotalBudgetLimits(t *testing.T) {
 	}
 }
 
-func TestQuotaHeadroom_ZeroBudgetClampsToMin(t *testing.T) {
+func TestQuotaHeadroom_ZeroBudgetReturnsZero(t *testing.T) {
 	t.Parallel()
 
-	// Total already consumed; headroom should be at least minReplicas to
-	// keep the HPA spec valid.
+	// Total already consumed: QuotaHeadroom should return 0 (raw budget = 0).
+	// BuildHPA then raises maxReplicas to minReplicas solely for HPA API validity,
+	// and the reconciler sets QuotaLimited=True because headroom (0) < spec.max (6).
 	tqSpec := makeTQSpec(10, 6)
 	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 2, Max: 6}}
 
 	h := QuotaHeadroom(tqSpec, adSpec, 10) // total budget remaining = 0
-	if h < 2 {
-		t.Errorf("expected headroom >= minReplicas(2), got %d", h)
+	if h != 0 {
+		t.Errorf("expected headroom=0 when budget exhausted, got %d", h)
 	}
 }
 
@@ -302,15 +303,17 @@ func TestQuotaHeadroom_NegativeUsedByOthers(t *testing.T) {
 	t.Parallel()
 
 	// usedReplicasByOthers > MaxTotalReplicas: the negative totalBudgetRemaining
-	// must be clamped to 0, which forces headroom down to minReplicas.
+	// must be clamped to 0 and headroom returns 0 (raw budget exhausted).
+	// The reconciler will set QuotaLimited=True and BuildHPA will floor maxReplicas
+	// at minReplicas=1 solely to keep the HPA spec valid.
 	tqSpec := makeTQSpec(6, 4)
 	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 4}}
 
-	// usedByOthers=10 > MaxTotalReplicas=6 → totalBudgetRemaining goes negative;
-	// headroom must be clamped to 0 then raised to Min=1.
+	// usedByOthers=10 > MaxTotalReplicas=6 → totalBudgetRemaining clamps to 0;
+	// headroom = min(perAgentCeiling=4, 0) = 0.
 	h := QuotaHeadroom(tqSpec, adSpec, 10)
-	if h != 1 {
-		t.Errorf("expected headroom=1 (clamped to minReplicas when budget<0), got %d", h)
+	if h != 0 {
+		t.Errorf("expected headroom=0 when budget is negative (over-consumed), got %d", h)
 	}
 }
 

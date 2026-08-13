@@ -151,12 +151,17 @@ func IsQuotaCapped(ad *agentraxv1alpha1.AgentDeployment, quotaHeadroom int32) bo
 	return quotaHeadroom < ad.Spec.Replicas.Max
 }
 
-// QuotaHeadroom returns the maximum additional replicas the tenant quota
-// allows for this AgentDeployment, based on the TenantQuota's maxReplicasPerAgent
-// field. The reconciler should pass this into BuildHPA.
+// QuotaHeadroom returns the raw quota ceiling for this AgentDeployment: the
+// smaller of MaxReplicasPerAgent and the total replica budget remaining after
+// accounting for other agents in the same tenant. The return value may be 0
+// when the total budget is exhausted.
+//
+// Callers must not confuse a 0 return with an error — it simply means no
+// additional replicas are budgeted. BuildHPA applies a floor of minReplicas
+// solely to keep the HPA spec valid; that does not change quota accounting.
 //
 // usedReplicasByOthers is the sum of spec.replicas.max for all OTHER
-// AgentDeployments in the same tenant (i.e., excluding this one).
+// AgentDeployments in the same tenant (excluding this one).
 // The caller is responsible for computing this from the live list.
 func QuotaHeadroom(tqSpec agentraxv1alpha1.TenantQuotaSpec, adSpec agentraxv1alpha1.AgentDeploymentSpec, usedReplicasByOthers int32) int32 {
 	// Per-agent ceiling from the TenantQuota.
@@ -168,16 +173,11 @@ func QuotaHeadroom(tqSpec agentraxv1alpha1.TenantQuotaSpec, adSpec agentraxv1alp
 		totalBudgetRemaining = 0
 	}
 
-	// The effective headroom is the smaller of the per-agent ceiling and the
-	// total budget remaining. This ensures neither constraint is violated.
+	// The effective headroom is the smaller of the two constraints so neither
+	// the per-agent ceiling nor the total budget is violated.
 	headroom := perAgentCeiling
 	if totalBudgetRemaining < headroom {
 		headroom = totalBudgetRemaining
-	}
-
-	// Ensure headroom is at least minReplicas so the HPA has a valid range.
-	if headroom < adSpec.Replicas.Min {
-		headroom = adSpec.Replicas.Min
 	}
 
 	return headroom
