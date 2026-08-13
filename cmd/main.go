@@ -105,8 +105,14 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
+	// Resolve the webhook-enabled flag once so both the server creation and
+	// handler registration use the same value. Log it explicitly so operators
+	// can confirm the resolved state at startup.
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	setupLog.Info("webhook state resolved", "enabled", enableWebhooks)
+
 	var webhookServer webhook.Server
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if enableWebhooks {
 		webhookServer = webhook.NewServer(webhook.Options{
 			TLSOpts: tlsOpts,
 		})
@@ -179,7 +185,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "TenantQuota")
 		os.Exit(1)
 	}
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if enableWebhooks {
 		if err = agentraxwebhook.SetupAgentDeploymentWebhookWithManager(mgr, quotaEnforcer); err != nil {
 			setupLog.Error(err, "unable to register webhook", "webhook", "AgentDeployment")
 			os.Exit(1)

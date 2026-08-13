@@ -47,11 +47,13 @@ func makeAD(name string, minR, maxR, target int32, metric string) *agentraxv1alp
 	}
 }
 
-// makeTQSpec is a test helper that builds a TenantQuotaSpec.
-func makeTQSpec(maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) agentraxv1alpha1.TenantQuotaSpec {
+// makeTQSpec is a test helper that builds a TenantQuotaSpec with the two
+// limits that vary across HPA/headroom tests. MaxAgents and MaxGPUs are fixed
+// at 10 and 0 respectively — they do not affect HPA or headroom calculations.
+func makeTQSpec(maxTotalReplicas, maxReplicasPerAgent int32) agentraxv1alpha1.TenantQuotaSpec {
 	return agentraxv1alpha1.TenantQuotaSpec{
-		MaxAgents:           maxAgents,
-		MaxGPUs:             maxGPUs,
+		MaxAgents:           10,
+		MaxGPUs:             0,
 		MaxTotalReplicas:    maxTotalReplicas,
 		MaxReplicasPerAgent: maxReplicasPerAgent,
 	}
@@ -73,7 +75,7 @@ func TestBuildHPA_MinMaxReplicas(t *testing.T) {
 	}
 }
 
-func TestBuildHPA_QuotaCapplied(t *testing.T) {
+func TestBuildHPA_QuotaCapApplied(t *testing.T) {
 	t.Parallel()
 
 	ad := makeAD("query-agent", 1, 10, 50, MetricQueueDepth)
@@ -98,14 +100,17 @@ func TestBuildHPA_QuotaCapNotApplied(t *testing.T) {
 func TestBuildHPA_QuotaHeadroomBelowMin(t *testing.T) {
 	t.Parallel()
 
-	// Edge: quota headroom is 0, but minReplicas is 1.
-	// The HPA spec must remain valid (max >= min).
+	// Edge: quota headroom is 0 but minReplicas is 1.
+	// BuildHPA must clamp maxReplicas to minReplicas (1) so the HPA spec stays valid.
 	ad := makeAD("query-agent", 1, 5, 50, MetricQueueDepth)
 	hpa := BuildHPA(ad, 0)
 
-	if hpa.Spec.MaxReplicas < *hpa.Spec.MinReplicas {
-		t.Errorf("HPA maxReplicas (%d) < minReplicas (%d): invalid spec",
-			hpa.Spec.MaxReplicas, *hpa.Spec.MinReplicas)
+	if hpa.Spec.MinReplicas == nil || *hpa.Spec.MinReplicas != 1 {
+		t.Errorf("expected minReplicas=1, got %v", hpa.Spec.MinReplicas)
+	}
+	if hpa.Spec.MaxReplicas != 1 {
+		t.Errorf("expected maxReplicas=1 (clamped to minReplicas when headroom=0), got %d",
+			hpa.Spec.MaxReplicas)
 	}
 }
 
@@ -148,6 +153,9 @@ func TestBuildHPA_MetricGPUUtilization(t *testing.T) {
 func TestBuildHPA_MetricUnknownDefaultsToQueueDepth(t *testing.T) {
 	t.Parallel()
 
+	// Unknown metric values currently fall back to queue depth.
+	// This is intentional for forward-compatibility until the CRD enum
+	// validation makes unknown values impossible at admission time.
 	ad := makeAD("agent", 1, 3, 50, "unknownMetric")
 	hpa := BuildHPA(ad, 10)
 
@@ -253,7 +261,7 @@ func TestQuotaHeadroom_PerAgentCeilingLimits(t *testing.T) {
 	t.Parallel()
 
 	// maxReplicasPerAgent=4 is smaller than the total budget remaining.
-	tqSpec := makeTQSpec(10, 0, 20, 4)
+	tqSpec := makeTQSpec(20, 4)
 	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 10}}
 
 	h := QuotaHeadroom(tqSpec, adSpec, 0)
@@ -267,7 +275,7 @@ func TestQuotaHeadroom_TotalBudgetLimits(t *testing.T) {
 
 	// Total budget remaining = 20 - 18 = 2; per-agent ceiling = 6.
 	// Headroom should be min(6, 2) = 2.
-	tqSpec := makeTQSpec(10, 0, 20, 6)
+	tqSpec := makeTQSpec(20, 6)
 	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 6}}
 
 	h := QuotaHeadroom(tqSpec, adSpec, 18)
@@ -281,7 +289,7 @@ func TestQuotaHeadroom_ZeroBudgetClampsToMin(t *testing.T) {
 
 	// Total already consumed; headroom should be at least minReplicas to
 	// keep the HPA spec valid.
-	tqSpec := makeTQSpec(10, 0, 10, 6)
+	tqSpec := makeTQSpec(10, 6)
 	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 2, Max: 6}}
 
 	h := QuotaHeadroom(tqSpec, adSpec, 10) // total budget remaining = 0
@@ -293,13 +301,16 @@ func TestQuotaHeadroom_ZeroBudgetClampsToMin(t *testing.T) {
 func TestQuotaHeadroom_NegativeUsedByOthers(t *testing.T) {
 	t.Parallel()
 
-	// usedReplicasByOthers=0; full budget available.
-	tqSpec := makeTQSpec(10, 0, 12, 6)
-	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 6}}
+	// usedReplicasByOthers > MaxTotalReplicas: the negative totalBudgetRemaining
+	// must be clamped to 0, which forces headroom down to minReplicas.
+	tqSpec := makeTQSpec(6, 4)
+	adSpec := agentraxv1alpha1.AgentDeploymentSpec{Replicas: agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 4}}
 
-	h := QuotaHeadroom(tqSpec, adSpec, 0)
-	if h != 6 {
-		t.Errorf("expected headroom=6 when no others, got %d", h)
+	// usedByOthers=10 > MaxTotalReplicas=6 → totalBudgetRemaining goes negative;
+	// headroom must be clamped to 0 then raised to Min=1.
+	h := QuotaHeadroom(tqSpec, adSpec, 10)
+	if h != 1 {
+		t.Errorf("expected headroom=1 (clamped to minReplicas when budget<0), got %d", h)
 	}
 }
 

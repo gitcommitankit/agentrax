@@ -14,7 +14,11 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: adapter-config
+  # Use a distinct name so this ConfigMap does not collide with or overwrite
+  # the upstream prometheus-adapter ConfigMap (commonly named adapter-config).
+  # Reference this name in your prometheus-adapter Deployment via
+  # --config=/etc/adapter/config.yaml mounted from this ConfigMap.
+  name: agentrax-custom-metrics
   namespace: monitoring
   labels:
     app.kubernetes.io/name: prometheus-adapter

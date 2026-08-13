@@ -143,8 +143,9 @@ var _ = BeforeSuite(func() {
 	testEnforcer = quota.NewEnforcer(quota.DefaultGPUResourceName)
 
 	testReconciler = &AgentDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		GPUResourceName: quota.DefaultGPUResourceName,
 	}
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 

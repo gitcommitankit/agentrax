@@ -47,6 +47,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"time"
 
@@ -283,7 +284,7 @@ type bytesReaderWrapper struct {
 
 func (r *bytesReaderWrapper) Read(p []byte) (n int, err error) {
 	if r.pos >= len(r.data) {
-		return 0, fmt.Errorf("EOF")
+		return 0, io.EOF
 	}
 	n = copy(p, r.data[r.pos:])
 	r.pos += n

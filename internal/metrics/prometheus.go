@@ -28,8 +28,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// defaultTimeout is the per-request HTTP timeout used when no custom timeout is set.
+const defaultTimeout = 10 * time.Second
 
 // Client is a lightweight HTTP client for the Prometheus query API.
 // Create one with NewClient; the zero value is not usable.
@@ -38,15 +42,29 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// Option is a functional option for NewClient.
+type Option func(*Client)
+
+// WithTimeout overrides the default 10-second per-request timeout.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		c.httpClient.Timeout = d
+	}
+}
+
 // NewClient returns a Client pointed at the given Prometheus base URL
 // (e.g. "http://prometheus.monitoring.svc:9090").
-func NewClient(baseURL string) *Client {
-	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+// Trailing slashes on baseURL are stripped so that URL concatenation always
+// produces a single-slash boundary (e.g. baseURL + "/api/v1/query").
+func NewClient(baseURL string, opts ...Option) *Client {
+	c := &Client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: &http.Client{Timeout: defaultTimeout},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // QueryScalar executes a PromQL instant query and returns the scalar result.
@@ -154,8 +172,21 @@ func parseScalarFromQueryResponse(body []byte) (float64, error) {
 
 	switch r.Data.ResultType {
 	case "scalar":
-		// Scalar result: Data.Result is a [timestamp, "value"] pair.
-		return extractValueFromPair(r.Data.Result[0])
+		// Scalar result: Data.Result is a [timestamp, "value"] pair at index 0.
+		// Require exactly two elements to guard against a malformed payload;
+		// we read the value string from index 1 (index 0 is the Unix timestamp).
+		if len(r.Data.Result) == 0 {
+			return 0, fmt.Errorf("Prometheus scalar result is empty")
+		}
+		var pair [2]json.RawMessage
+		if err := json.Unmarshal(r.Data.Result[0], &pair); err != nil {
+			return 0, fmt.Errorf("decoding scalar value pair: %w", err)
+		}
+		var valStr string
+		if err := json.Unmarshal(pair[1], &valStr); err != nil {
+			return 0, fmt.Errorf("decoding scalar value string: %w", err)
+		}
+		return strconv.ParseFloat(valStr, 64)
 	case "vector":
 		if len(r.Data.Result) == 0 {
 			return 0, fmt.Errorf("Prometheus vector result is empty (metric may not exist yet)")

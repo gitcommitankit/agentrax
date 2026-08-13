@@ -27,6 +27,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -940,6 +941,17 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 				}
 				return hpa.Spec.MaxReplicas
 			}, testTimeout, testInterval).Should(Equal(int32(5)))
+
+			// Verify QuotaLimited condition is NOT True — max=5 is within headroom of 10.
+			Eventually(func() bool {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, latest); err != nil {
+					return true // retry
+				}
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				return c != nil && c.Status == metav1.ConditionTrue
+			}, testTimeout, testInterval).Should(BeFalse(),
+				"QuotaLimited should not be True when max (5) <= headroom (10)")
 		})
 	})
 
@@ -952,20 +964,21 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			err := k8sClient.Create(ctx, ns)
 			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
 
-			// Create a restrictive TenantQuota: maxReplicasPerAgent=2, maxTotalReplicas=2.
+			// Start with a generous quota (maxReplicasPerAgent=5) so the initial
+			// create passes webhook validation.
 			tq := &agentraxv1alpha1.TenantQuota{
 				ObjectMeta: metav1.ObjectMeta{Name: "team-quota-test", Namespace: nsName},
 				Spec: agentraxv1alpha1.TenantQuotaSpec{
 					MaxAgents:           10,
 					MaxGPUs:             0,
-					MaxTotalReplicas:    2,
-					MaxReplicasPerAgent: 2,
+					MaxTotalReplicas:    5,
+					MaxReplicasPerAgent: 5,
 				},
 			}
 			err = k8sClient.Create(ctx, tq)
 			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
 
-			// Create an AgentDeployment that asks for max=5 (> quota ceiling of 2).
+			// Create an AgentDeployment with max=5, which fits the initial quota.
 			ad := &agentraxv1alpha1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "ad-quota-capped", Namespace: nsName},
 				Spec: agentraxv1alpha1.AgentDeploymentSpec{
@@ -974,17 +987,12 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 					TenantRef: "team-quota-test",
 					Replicas: agentraxv1alpha1.ScalingPolicy{
 						Min:    1,
-						Max:    5, // exceeds maxReplicasPerAgent=2
+						Max:    5,
 						Metric: "queueDepth",
 						Target: 50,
 					},
 				},
 			}
-			// The webhook validates max <= maxReplicasPerAgent; bypass for this test
-			// by creating directly (the reconciler, not the webhook, enforces HPA capping).
-			// We use the k8sClient which goes through the webhook; lower max to 2 to
-			// pass validation, then patch the spec.
-			ad.Spec.Replicas.Max = 2 // comply with webhook validation
 			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
 			key = types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}
 		})
@@ -992,38 +1000,85 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 		AfterEach(func() {
 			deleteAgentDeployment(key)
 			deleteChildResources(key)
+			// Delete the TenantQuota so each It block starts from a clean slate.
+			// Without this, the first It (which lowers the ceiling) bleeds state
+			// into the next BeforeEach, causing webhook rejection on the AD create.
+			tq := &agentraxv1alpha1.TenantQuota{}
+			if err := k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), tq); err == nil {
+				_ = k8sClient.Delete(ctx, tq)
+			}
 		})
 
-		It("caps HPA maxReplicas at quota headroom", func() {
-			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, key, hpa)
-			}, testTimeout, testInterval).Should(Succeed())
-
-			// spec.replicas.max=2 matches quota ceiling; maxReplicas should be 2.
-			Expect(hpa.Spec.MaxReplicas).To(Equal(int32(2)))
-		})
-
-		It("clears QuotaLimited condition when not capped", func() {
-			// With max==headroom, the condition should not be present.
-			Eventually(func() bool {
+		It("caps HPA maxReplicas and sets QuotaLimited condition when quota is lowered", func() {
+			// Wait for initial HPA with maxReplicas=5 (uncapped).
+			Eventually(func() int32 {
 				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 				if err := k8sClient.Get(ctx, key, hpa); err != nil {
-					return false
+					return 0
 				}
-				// HPA created means reconcile ran; check condition on the AD.
-				ad := &agentraxv1alpha1.AgentDeployment{}
-				if err := k8sClient.Get(ctx, key, ad); err != nil {
-					return false
+				return hpa.Spec.MaxReplicas
+			}, testTimeout, testInterval).Should(Equal(int32(5)))
+
+			// Lower the TenantQuota ceiling to maxReplicasPerAgent=2, maxTotalReplicas=2.
+			// This causes the reconciler to cap HPA.maxReplicas at 2 and set QuotaLimited.
+			tq := &agentraxv1alpha1.TenantQuota{}
+			Expect(k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), tq)).To(Succeed())
+			patch := tq.DeepCopy()
+			patch.Spec.MaxReplicasPerAgent = 2
+			patch.Spec.MaxTotalReplicas = 2
+			Expect(k8sClient.Patch(ctx, patch, client.MergeFrom(tq))).To(Succeed())
+
+			// Trigger a reconcile by patching the AD (no-op label change).
+			ad := &agentraxv1alpha1.AgentDeployment{}
+			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+			adPatch := ad.DeepCopy()
+			if adPatch.Labels == nil {
+				adPatch.Labels = make(map[string]string)
+			}
+			adPatch.Labels["agentrax.io/reconcile-trigger"] = "quota-lower"
+			Expect(k8sClient.Patch(ctx, adPatch, client.MergeFrom(ad))).To(Succeed())
+
+			// HPA maxReplicas must be reduced to the new quota ceiling (2).
+			Eventually(func() int32 {
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+				if err := k8sClient.Get(ctx, key, hpa); err != nil {
+					return 0
 				}
-				for _, c := range ad.Status.Conditions {
-					if c.Type == agentraxv1alpha1.ConditionQuotaLimited && c.Status == "True" {
-						return false // should not be set when not capped
-					}
+				return hpa.Spec.MaxReplicas
+			}, testTimeout, testInterval).Should(Equal(int32(2)),
+				"HPA maxReplicas should be capped at the new quota ceiling")
+
+			// QuotaLimited condition must be True because spec.max (5) > headroom (2).
+			Eventually(func() metav1.ConditionStatus {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, latest); err != nil {
+					return metav1.ConditionUnknown
 				}
-				return true
-			}, testTimeout, testInterval).Should(BeTrue(),
-				"QuotaLimited condition should not be True when max == headroom")
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				if c == nil {
+					return metav1.ConditionUnknown
+				}
+				return c.Status
+			}, testTimeout, testInterval).Should(Equal(metav1.ConditionTrue),
+				"QuotaLimited condition should be True when HPA is capped by quota")
+		})
+
+		It("QuotaLimited condition is absent when max equals headroom", func() {
+			// With the generous initial quota (max=5, ceiling=5), the condition
+			// must never be True. Use Consistently to guard against transient flap.
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{})
+			}, testTimeout, testInterval).Should(Succeed(), "wait for first reconcile")
+
+			Consistently(func() bool {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, key, latest); err != nil {
+					return true // treat Get error as "might be True" to keep retrying
+				}
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				return c != nil && c.Status == metav1.ConditionTrue
+			}, 3*time.Second, testInterval).Should(BeFalse(),
+				"QuotaLimited should never be True when max == headroom")
 		})
 	})
 })
