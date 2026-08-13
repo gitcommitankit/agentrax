@@ -341,6 +341,14 @@ func TestRelease_Concurrent(t *testing.T) {
 					t.Errorf("after Release, canAdmit(%q) = false; reason: %q", k, reason)
 				}
 			}
+
+			// Every reservation must be gone, not merely within headroom.
+			e.mu.Lock()
+			remaining := len(e.reservations)
+			e.mu.Unlock()
+			if remaining != 0 {
+				t.Errorf("after concurrent Release, %d reservations remain; want 0", remaining)
+			}
 		})
 	}
 }

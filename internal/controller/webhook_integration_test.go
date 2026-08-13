@@ -305,14 +305,17 @@ var _ = Describe("Admission Webhook (integration)", func() {
 			// calls k8sClient.Create, maximising the chance of genuine concurrency
 			// at the webhook admission layer.
 			start := make(chan struct{})
-			for _, name := range []string{"ad-race-a", "ad-race-b"} {
-				name := name
+			errs := make([]error, 2)
+			for i, name := range []string{"ad-race-a", "ad-race-b"} {
+				i, name := i, name
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					<-start // wait until both goroutines are ready
 					ad := whMinimalAD(name, ns, tqName, 1)
-					if err := k8sClient.Create(ctx, ad); err == nil {
+					err := k8sClient.Create(ctx, ad)
+					errs[i] = err
+					if err == nil {
 						atomic.AddInt64(&successCount, 1)
 					} else {
 						atomic.AddInt64(&failCount, 1)
@@ -326,6 +329,15 @@ var _ = Describe("Admission Webhook (integration)", func() {
 				"exactly one concurrent create should succeed (in-flight reservation protects the quota)")
 			Expect(failCount).To(Equal(int64(1)),
 				"exactly one concurrent create should be rejected by the webhook")
+
+			// The rejection must come from quota admission, not an unrelated failure.
+			for _, err := range errs {
+				if err == nil {
+					continue
+				}
+				Expect(apierrors.IsInvalid(err) || apierrors.IsForbidden(err)).To(BeTrue(),
+					"expected 422 Invalid or 403 Forbidden from quota admission, got: %v", err)
+			}
 		})
 	})
 
