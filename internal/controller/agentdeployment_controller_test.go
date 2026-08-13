@@ -346,6 +346,14 @@ var _ = Describe("AgentDeployment Controller", func() {
 			Expect(sm.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
 			Expect(sm.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*sm.OwnerReferences[0].Controller).To(BeTrue(), "ServiceMonitor owner reference must have Controller=true")
+
+			// TargetLabels must include both labels used by the HPA ExternalMetric selector
+			// so that Prometheus carries them into scraped samples and the Adapter
+			// query's <<.LabelMatchers>> can filter by agent name.
+			Expect(sm.Spec.TargetLabels).To(ContainElements(
+				"app.kubernetes.io/name",
+				"app.kubernetes.io/managed-by",
+			), "TargetLabels must propagate HPA selector labels into Prometheus samples")
 		})
 
 		It("sets status.phase to Pending initially (no running pods in envtest)", func() {
