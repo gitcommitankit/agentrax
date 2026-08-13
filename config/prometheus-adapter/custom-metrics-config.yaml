@@ -1,0 +1,62 @@
+# Prometheus Adapter custom metrics configuration for Agentrax.
+#
+# This ConfigMap is consumed by the prometheus-adapter deployment (typically in
+# the monitoring namespace). It maps PromQL queries to named custom metrics that
+# the HorizontalPodAutoscaler can target via the custom.metrics.k8s.io API.
+#
+# Deploy with:
+#   kubectl apply -f config/prometheus-adapter/custom-metrics-config.yaml
+#   kubectl rollout restart deployment/prometheus-adapter -n monitoring
+#
+# Verify metrics are registered:
+#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adapter-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus-adapter
+    app.kubernetes.io/managed-by: agentrax
+data:
+  config.yaml: |
+    rules:
+      # ── queueDepth ────────────────────────────────────────────────────────────
+      # Maps the agent's request-queue depth metric to a per-pod External metric
+      # named "agentrax_queue_depth". Agents must expose this gauge on their
+      # /metrics endpoint; the ServiceMonitor (created by the Agentrax reconciler)
+      # tells Prometheus where to scrape.
+      #
+      # Naming convention: "External" metrics are scoped by namespace+pod labels
+      # so each AgentDeployment's HPA reads only its own pods' values.
+      - seriesQuery: 'agentrax_queue_depth{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "agentrax_queue_depth"
+          as: "agentrax_queue_depth"
+        metricsQuery: 'avg(agentrax_queue_depth{namespace="<<.Namespace>>",pod=~"<<.PodLabelSelector>>"}) by (pod)'
+
+      # ── gpuUtilization ────────────────────────────────────────────────────────
+      # Maps GPU utilization (0–100 range, per-device percentage) to the External
+      # metric "agentrax_gpu_utilization".
+      #
+      # If your GPU device plugin exposes a different metric name (e.g., from DCGM),
+      # update the seriesQuery and metricsQuery here accordingly. The HPA target in
+      # the AgentDeployment spec uses the "as" name, which stays stable.
+      - seriesQuery: 'agentrax_gpu_utilization{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "agentrax_gpu_utilization"
+          as: "agentrax_gpu_utilization"
+        metricsQuery: 'avg(agentrax_gpu_utilization{namespace="<<.Namespace>>",pod=~"<<.PodLabelSelector>>"}) by (pod)'

@@ -31,6 +31,10 @@ spec:
   maxTotalReplicas: 10
   # Maximum number of distinct AgentDeployments allowed.
   maxAgents: 5
+  # Maximum GPU count allowed across all agents in this namespace.
+  maxGPUs: 2
+  # Maximum replica count allowed for any single AgentDeployment.
+  maxReplicasPerAgent: 5
 
 ---
 # 3. AgentDeployment — the main resource.

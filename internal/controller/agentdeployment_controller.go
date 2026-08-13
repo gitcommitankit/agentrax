@@ -24,11 +24,13 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,12 +41,18 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/scaling"
 )
 
 // AgentDeploymentReconciler reconciles an AgentDeployment object.
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// GPUResourceName is the Kubernetes resource name used to count GPU units
+	// (e.g. "nvidia.com/gpu"). Injected from the --gpu-resource-name operator flag.
+	// Used when computing quota headroom for HPA max-replicas capping.
+	GPUResourceName string
 
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
@@ -73,11 +81,13 @@ func (r *AgentDeploymentReconciler) SetDeregister(fn func(ctx context.Context, a
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agentrax.io,resources=tenantquotas,verbs=get;list;watch
 
 // Reconcile drives the AgentDeployment's observed state toward its declared spec.
 // It creates and self-heals a Deployment, Service, and (when Prometheus Operator is present)
@@ -136,7 +146,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
 	}
 
-	// 6. Derive status from the live Deployment and update it — always last.
+	// 6. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
+	if result, err := r.reconcileHPA(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
+	} else if result.RequeueAfter > 0 {
+		return result, nil
+	}
+
+	// 7. Derive status from the live Deployment and update it — always last.
 	if result, err := r.updateStatus(ctx, ad, logger); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
@@ -254,6 +271,109 @@ func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context,
 		return nil
 	})
 	return err
+}
+
+// reconcileHPA creates or updates the HorizontalPodAutoscaler owned by this
+// AgentDeployment. It is skipped when a canary rollout is in progress because
+// Phase 4 owns the HPA lifecycle during rollout (deletes it, recreates it on
+// promote/rollback). The HPA's maxReplicas is capped at the tenant quota
+// headroom; when capping occurs, a QuotaLimited condition is set on status.
+func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (ctrl.Result, error) {
+	// Phase 4 owns the HPA when a canary rollout is in progress. We must not
+	// re-create or update the HPA here while Phase 4 has deliberately deleted it.
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress {
+		return ctrl.Result{}, nil
+	}
+
+	// Fetch the TenantQuota to compute quota headroom.
+	tq := &agentraxv1alpha1.TenantQuota{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ad.Spec.TenantRef, Namespace: ad.Namespace}, tq); err != nil {
+		if apierrors.IsNotFound(err) {
+			// TenantQuota missing — the webhook prevents this on create, but it
+			// can happen if the TenantQuota is deleted while agents exist.
+			// Requeue and surface a condition rather than failing hard.
+			SetCondition(ad, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
+				"TenantQuotaNotFound",
+				fmt.Sprintf("TenantQuota %q not found in namespace %s", ad.Spec.TenantRef, ad.Namespace))
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("fetching TenantQuota %q: %w", ad.Spec.TenantRef, err)
+	}
+
+	// Compute how many replicas the other agents in this tenant already consume
+	// so QuotaHeadroom accounts for the full tenant budget.
+	usedByOthers, err := r.replicasUsedByOtherAgents(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("computing replica usage for quota headroom: %w", err)
+	}
+
+	headroom := scaling.QuotaHeadroom(tq.Spec, ad.Spec, usedByOthers)
+	desiredHPA := scaling.BuildHPA(ad, headroom)
+
+	// Set controller owner reference before CreateOrUpdate so garbage collection
+	// removes the HPA when the AgentDeployment is deleted.
+	if err := controllerutil.SetControllerReference(ad, desiredHPA, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting HPA owner reference: %w", err)
+	}
+
+	existing := &autoscalingv2.HorizontalPodAutoscaler{}
+	existing.Name = desiredHPA.Name
+	existing.Namespace = desiredHPA.Namespace
+
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desiredHPA.Labels
+		existing.Spec.ScaleTargetRef = desiredHPA.Spec.ScaleTargetRef
+		existing.Spec.MinReplicas = desiredHPA.Spec.MinReplicas
+		existing.Spec.MaxReplicas = desiredHPA.Spec.MaxReplicas
+		existing.Spec.Metrics = desiredHPA.Spec.Metrics
+		existing.Spec.Behavior = desiredHPA.Spec.Behavior
+		// Re-apply owner reference in case it was cleared out-of-band.
+		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
+			return fmt.Errorf("setting HPA owner reference: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating/updating HPA: %w", err)
+	}
+
+	// Surface or clear the QuotaLimited condition based on whether capping occurred.
+	// Note: we mutate `ad` here but status is written by updateStatus at the end
+	// of the reconcile loop. This is safe because updateStatus re-fetches and merges.
+	if scaling.IsQuotaCapped(ad, headroom) {
+		SetCondition(ad, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
+			"HPAMaxReplicasCapped",
+			fmt.Sprintf("spec.replicas.max (%d) exceeds quota headroom (%d); HPA capped",
+				ad.Spec.Replicas.Max, headroom))
+	} else {
+		RemoveCondition(ad, agentraxv1alpha1.ConditionQuotaLimited)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// replicasUsedByOtherAgents returns the sum of spec.replicas.max across all
+// AgentDeployments in the same namespace that reference the same TenantQuota,
+// excluding the AgentDeployment being reconciled. This is used to compute the
+// remaining total-replica budget for the HPA quota-headroom calculation.
+func (r *AgentDeploymentReconciler) replicasUsedByOtherAgents(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (int32, error) {
+	list := &agentraxv1alpha1.AgentDeploymentList{}
+	if err := r.List(ctx, list, client.InNamespace(ad.Namespace)); err != nil {
+		return 0, fmt.Errorf("listing AgentDeployments for quota headroom: %w", err)
+	}
+
+	var total int32
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Spec.TenantRef != ad.Spec.TenantRef {
+			continue
+		}
+		if other.Name == ad.Name && other.Namespace == ad.Namespace {
+			continue // exclude self
+		}
+		total += other.Spec.Replicas.Max
+	}
+	return total, nil
 }
 
 // updateStatus derives the AgentDeployment status from the live Deployment and writes it.
@@ -502,7 +622,8 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{})
+		Owns(&corev1.Service{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{})
 
 	if r.hasServiceMonitorCRD {
 		bldr = bldr.Owns(&monitoringv1.ServiceMonitor{})

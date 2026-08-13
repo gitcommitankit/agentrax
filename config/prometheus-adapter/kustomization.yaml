@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Prometheus Adapter custom metrics configuration for Agentrax.
+#
+# Apply this overlay after the Prometheus Adapter base is installed:
+#   kubectl apply -k config/prometheus-adapter/
+#
+# Note: This kustomization targets the monitoring namespace where the
+# prometheus-adapter deployment is expected to run. If your cluster uses
+# a different namespace, update the namespace field below.
+namespace: monitoring
+
+resources:
+  - custom-metrics-config.yaml
