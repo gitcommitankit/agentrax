@@ -230,18 +230,14 @@ func (v *AgentDeploymentCustomValidator) validateSpec(
 		allErrs = append(allErrs, validateMCPTools(specPath.Child("mcp", "tools"), ad.Spec.MCP.Tools)...)
 	}
 
-	// ── 5. Quota admission check ──
-	// Compute current usage from the TenantQuota status. The status is kept
-	// accurate by the TenantQuota reconciler; we add in-flight reservations to
-	// handle concurrent near-limit creates.
+	// ── 5. Quota admission check (atomic check-and-reserve) ──
+	// AdmitAndReserve holds the in-flight mutex across both the quota check
+	// and the reservation write, preventing concurrent near-limit creates from
+	// both slipping through the quota ceiling.
 	admissionKey := fmt.Sprintf("%s/%s", ad.Namespace, ad.Name)
-	ok, reason := v.Enforcer.CanAdmit(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec)
+	ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
 	if !ok {
 		allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
-	} else {
-		// Reserve in-flight slot for the duration the webhook response is in transit.
-		// The reservation is automatically swept after reservationTTL.
-		v.Enforcer.Reserve(admissionKey, ad.Spec, oldSpec, reservationTTL)
 	}
 
 	return allErrs

@@ -248,6 +248,94 @@ func (e *Enforcer) CanAdmit(
 	return true, ""
 }
 
+// AdmitAndReserve is an atomic version of CanAdmit followed by Reserve.
+// It holds the in-flight mutex continuously from the quota check through the
+// reservation write, eliminating the TOCTOU window that exists when the two
+// operations are called separately: a concurrent near-limit create cannot slip
+// through because no other goroutine can observe stale in-flight counts between
+// the check and the write.
+//
+// Returns (true, "") and writes the reservation when admission is allowed.
+// Returns (false, reason) without touching the map when admission is denied.
+// The reservation expires after ttl and is cleaned up by the sweep goroutine.
+func (e *Enforcer) AdmitAndReserve(
+	admissionKey string,
+	quota agentraxv1alpha1.TenantQuotaSpec,
+	committedUsage agentraxv1alpha1.TenantQuotaStatus,
+	requested agentraxv1alpha1.AgentDeploymentSpec,
+	oldSpec *agentraxv1alpha1.AgentDeploymentSpec,
+	ttl time.Duration,
+) (bool, string) {
+	// Compute the delta this request adds on top of committed usage.
+	var deltaAgents, deltaGPUs, deltaReplicas int32
+	if oldSpec == nil {
+		deltaAgents = 1
+		deltaGPUs = e.gpusForAD(requested)
+		deltaReplicas = requested.Replicas.Max
+	} else {
+		deltaGPUs = e.gpusForAD(requested) - e.gpusForAD(*oldSpec)
+		deltaReplicas = requested.Replicas.Max - oldSpec.Replicas.Max
+	}
+
+	// Hold the mutex for the entire check-then-reserve operation so no
+	// concurrent admission can observe an inconsistent in-flight snapshot.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Sum in-flight, skipping our own slot (same exclusion logic as CanAdmit).
+	now := e.nowFn()
+	var inFlight reservationEntry
+	for k, v := range e.reservations {
+		if k == admissionKey || now.After(v.expiry) {
+			continue
+		}
+		inFlight.agents += v.agents
+		inFlight.gpus += v.gpus
+		inFlight.replicas += v.replicas
+	}
+
+	projectedAgents := committedUsage.UsedAgents + inFlight.agents + deltaAgents
+	projectedGPUs := committedUsage.UsedGPUs + inFlight.gpus + deltaGPUs
+	projectedReplicas := committedUsage.UsedTotalReplicas + inFlight.replicas + deltaReplicas
+
+	isUpdate := oldSpec != nil
+
+	if projectedAgents > quota.MaxAgents && (!isUpdate || deltaAgents > 0) {
+		return false, fmt.Sprintf(
+			"would exceed maxAgents (%d): current=%d in-flight=%d delta=%d",
+			quota.MaxAgents, committedUsage.UsedAgents, inFlight.agents, deltaAgents,
+		)
+	}
+	if quota.MaxGPUs > 0 && projectedGPUs > quota.MaxGPUs && (!isUpdate || deltaGPUs > 0) {
+		return false, fmt.Sprintf(
+			"would exceed maxGPUs (%d): current=%d in-flight=%d delta=%d",
+			quota.MaxGPUs, committedUsage.UsedGPUs, inFlight.gpus, deltaGPUs,
+		)
+	}
+	if projectedReplicas > quota.MaxTotalReplicas && (!isUpdate || deltaReplicas > 0) {
+		return false, fmt.Sprintf(
+			"would exceed maxTotalReplicas (%d): current=%d in-flight=%d delta=%d",
+			quota.MaxTotalReplicas, committedUsage.UsedTotalReplicas, inFlight.replicas, deltaReplicas,
+		)
+	}
+	if requested.Replicas.Max > quota.MaxReplicasPerAgent && (!isUpdate || requested.Replicas.Max > oldSpec.Replicas.Max) {
+		return false, fmt.Sprintf(
+			"spec.replicas.max (%d) exceeds maxReplicasPerAgent (%d)",
+			requested.Replicas.Max, quota.MaxReplicasPerAgent,
+		)
+	}
+
+	// Admission passed — write the reservation under the same lock so the
+	// slot is visible to any concurrent AdmitAndReserve caller immediately.
+	e.reservations[admissionKey] = &reservationEntry{
+		agents:   deltaAgents,
+		gpus:     deltaGPUs,
+		replicas: deltaReplicas,
+		expiry:   now.Add(ttl),
+	}
+	return true, ""
+}
+
 // sumInflight returns the total in-flight resource counts excluding the entry
 // for excludeKey (so this AD's existing slot is not double-counted when the
 // same AD retries admission).

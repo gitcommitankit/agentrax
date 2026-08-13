@@ -18,6 +18,8 @@ package quota_test
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,6 +279,44 @@ func TestReservation_DoesNotDoubleCount(t *testing.T) {
 	// usage.agents=1, in-flight from ad-X is excluded, delta=1 → projected=2 ≤ 3 → ok
 	if !ok {
 		t.Error("CanAdmit for the same AD key should not be blocked by its own reservation")
+	}
+}
+
+// TestAdmitAndReserve_AtomicRaceProtection verifies that concurrent calls to
+// AdmitAndReserve for the same final quota slot allow exactly one through.
+// This is the property that the separate CanAdmit+Reserve two-call pattern
+// could not guarantee (TOCTOU race).
+func TestAdmitAndReserve_AtomicRaceProtection(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+	// Exactly 1 agent slot remaining.
+	q := makeQuota(1, 0, 5, 5)
+	usage := makeUsage(0, 0, 0)
+	spec := makeSpec(1, "")
+
+	var (
+		successCount int64
+		failCount    int64
+		wg           sync.WaitGroup
+	)
+	for _, key := range []string{"ns/ad-A", "ns/ad-B"} {
+		key := key
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, _ := e.AdmitAndReserve(key, q, usage, spec, nil, 5*time.Second)
+			if ok {
+				atomic.AddInt64(&successCount, 1)
+			} else {
+				atomic.AddInt64(&failCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 AdmitAndReserve to succeed; got successCount=%d failCount=%d",
+			successCount, failCount)
 	}
 }
 
