@@ -301,11 +301,16 @@ var _ = Describe("Admission Webhook (integration)", func() {
 				wg           sync.WaitGroup
 			)
 
+			// Start barrier: ensure both goroutines are scheduled before either
+			// calls k8sClient.Create, maximising the chance of genuine concurrency
+			// at the webhook admission layer.
+			start := make(chan struct{})
 			for _, name := range []string{"ad-race-a", "ad-race-b"} {
 				name := name
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+					<-start // wait until both goroutines are ready
 					ad := whMinimalAD(name, ns, tqName, 1)
 					if err := k8sClient.Create(ctx, ad); err == nil {
 						atomic.AddInt64(&successCount, 1)
@@ -314,6 +319,7 @@ var _ = Describe("Admission Webhook (integration)", func() {
 					}
 				}()
 			}
+			close(start) // release both goroutines simultaneously
 			wg.Wait()
 
 			Expect(successCount).To(Equal(int64(1)),

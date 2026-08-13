@@ -234,10 +234,14 @@ func (v *AgentDeploymentCustomValidator) validateSpec(
 	// AdmitAndReserve holds the in-flight mutex across both the quota check
 	// and the reservation write, preventing concurrent near-limit creates from
 	// both slipping through the quota ceiling.
+	// Only run when all earlier checks pass: a spec that is already invalid
+	// must not create a reservation that would transiently block valid admits.
 	admissionKey := fmt.Sprintf("%s/%s", ad.Namespace, ad.Name)
-	ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
-	if !ok {
-		allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+	if len(allErrs) == 0 {
+		ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
+		if !ok {
+			allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+		}
 	}
 
 	return allErrs
