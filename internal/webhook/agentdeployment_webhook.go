@@ -57,7 +57,7 @@ func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager, enforcer *quota.En
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		WithDefaulter(&AgentDeploymentCustomDefaulter{}).
 		WithValidator(&AgentDeploymentCustomValidator{
-			Client:   mgr.GetClient(),
+			Client:   mgr.GetAPIReader(),
 			Enforcer: enforcer,
 		}).
 		Complete()
@@ -118,7 +118,7 @@ func isZeroResources(r corev1.ResourceRequirements) bool {
 // AgentDeploymentCustomValidator validates AgentDeployment specs at admission
 // time. It implements admission.CustomValidator.
 type AgentDeploymentCustomValidator struct {
-	Client   client.Client
+	Client   client.Reader
 	Enforcer *quota.Enforcer
 }
 
