@@ -830,12 +830,10 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 
 			// The reconciler should restore it within one reconcile interval with a new UID.
 			recreated := &autoscalingv2.HorizontalPodAutoscaler{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(ctx, key, recreated); err != nil {
-					return false
-				}
-				return recreated.UID != origUID
-			}, testTimeout, testInterval).Should(BeTrue(), "HPA should be self-healed with a new UID")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, key, recreated)).To(Succeed())
+				g.Expect(recreated.UID).NotTo(Equal(origUID))
+			}, testTimeout, testInterval).Should(Succeed(), "HPA should be self-healed with a new UID")
 
 			ad := &agentraxv1alpha1.AgentDeployment{}
 			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
@@ -1006,7 +1004,14 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 				},
 			}
 			err = k8sClient.Create(ctx, tq)
-			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+			if apierrors.IsAlreadyExists(err) {
+				existing := &agentraxv1alpha1.TenantQuota{}
+				Expect(k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), existing)).To(Succeed())
+				existing.Spec = tq.Spec
+				Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			// Create an AgentDeployment with max=5, which fits the initial quota.
 			ad := &agentraxv1alpha1.AgentDeployment{
@@ -1098,15 +1103,13 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 				return k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{})
 			}, testTimeout, testInterval).Should(Succeed(), "wait for first reconcile")
 
-			Consistently(func() bool {
+			Consistently(func(g Gomega) {
 				latest := &agentraxv1alpha1.AgentDeployment{}
-				if err := k8sClient.Get(ctx, key, latest); err != nil {
-					return true // treat Get error as "might be True" to keep retrying
-				}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
 				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
-				return c != nil && c.Status == metav1.ConditionTrue
-			}, 3*time.Second, testInterval).Should(BeFalse(),
-				"QuotaLimited should never be True when max == headroom")
+				g.Expect(c != nil && c.Status == metav1.ConditionTrue).To(BeFalse(),
+					"QuotaLimited should never be True when max == headroom")
+			}, 3*time.Second, testInterval).Should(Succeed())
 		})
 	})
 })
