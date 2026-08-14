@@ -300,6 +300,10 @@ func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 // resources are charged to the target tenant's quota, not a delta.
 func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 	t.Parallel()
+	const (
+		oldTenant    = "old-tenant"
+		targetTenant = "target-tenant"
+	)
 	e := newTestEnforcer(t)
 
 	// Target tenant quota is already at capacity (no room for a delta).
@@ -308,11 +312,11 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 
 	// Old spec was in a different tenant ("old-tenant").
 	oldSpec := makeSpec(3, "1") // 3 replicas, 1 GPU per replica = 3 GPUs total
-	oldSpec.TenantRef = "old-tenant"
+	oldSpec.TenantRef = oldTenant
 
 	// New spec moves to "target-tenant" with same resources.
 	newSpec := makeSpec(3, "1") // same resources: 3 replicas, 3 GPUs
-	newSpec.TenantRef = "target-tenant"
+	newSpec.TenantRef = targetTenant
 
 	// The target tenant is already at capacity. Since this is a cross-tenant
 	// move, the full amount (1 agent, 3 GPUs, 3 replicas) should be charged
@@ -332,10 +336,10 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 	targetUsage2 := makeUsage(1, 2, 4)     // current: 1 agent, 2 GPUs, 4 replicas
 
 	oldSpec2 := makeSpec(3, "1") // 3 replicas, 3 GPUs
-	oldSpec2.TenantRef = "old-tenant"
+	oldSpec2.TenantRef = oldTenant
 
 	newSpec2 := makeSpec(3, "1") // same resources
-	newSpec2.TenantRef = "target-tenant"
+	newSpec2.TenantRef = targetTenant
 
 	// Target can accommodate: 1+1=2 ≤ 3 agents, 2+3=5 ≤ 8 GPUs, 4+3=7 ≤ 10 replicas.
 	ok2, reason2 := e.CanAdmit("ns/ad-move2", targetQuota2, targetUsage2, newSpec2, &oldSpec2)
@@ -346,11 +350,11 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 	// Test case 3: Cross-tenant move with resource change (increase).
 	// Old spec: different tenant, 2 replicas, 2 GPUs.
 	oldSpec3 := makeSpec(2, "1")
-	oldSpec3.TenantRef = "old-tenant"
+	oldSpec3.TenantRef = oldTenant
 
 	// New spec: target tenant, 4 replicas, 4 GPUs.
 	newSpec3 := makeSpec(4, "1")
-	newSpec3.TenantRef = "target-tenant"
+	newSpec3.TenantRef = targetTenant
 
 	targetQuota3 := makeQuota(3, 5, 8, 5)
 	targetUsage3 := makeUsage(1, 1, 2) // 1 agent, 1 GPU, 2 replicas
@@ -367,10 +371,10 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 	targetUsage4 := makeUsage(1, 1, 2)
 
 	oldSpec4 := makeSpec(2, "1")
-	oldSpec4.TenantRef = "old-tenant"
+	oldSpec4.TenantRef = oldTenant
 
 	newSpec4 := makeSpec(4, "1") // 4 GPUs needed
-	newSpec4.TenantRef = "target-tenant"
+	newSpec4.TenantRef = targetTenant
 
 	// 1 + 4 = 5 GPUs > 4 → should be rejected.
 	ok4, reason4 := e.CanAdmit("ns/ad-move4", targetQuota4, targetUsage4, newSpec4, &oldSpec4)
