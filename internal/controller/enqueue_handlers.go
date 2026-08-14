@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
@@ -61,6 +62,8 @@ func enqueueAgentDeploymentsForTenantQuota(c client.Client) handler.EventHandler
 		}
 		list := &agentraxv1alpha1.AgentDeploymentList{}
 		if err := c.List(ctx, list, client.InNamespace(tq.Namespace)); err != nil {
+			log.FromContext(ctx).Error(err, "failed to list AgentDeployments for TenantQuota watch",
+				"tenantQuota", tq.Name, "namespace", tq.Namespace)
 			return nil
 		}
 		var reqs []reconcile.Request

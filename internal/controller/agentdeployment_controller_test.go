@@ -1018,7 +1018,7 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			// into the next BeforeEach, causing webhook rejection on the AD create.
 			tq := &agentraxv1alpha1.TenantQuota{}
 			if err := k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), tq); err == nil {
-				_ = k8sClient.Delete(ctx, tq)
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, tq))).To(Succeed())
 			}
 		})
 
