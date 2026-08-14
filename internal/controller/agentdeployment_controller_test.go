@@ -823,15 +823,19 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			Eventually(func() error {
 				return k8sClient.Get(ctx, key, hpa)
 			}, testTimeout, testInterval).Should(Succeed(), "HPA should appear initially")
+			origUID := hpa.UID
 
 			// Delete the HPA out-of-band.
 			Expect(k8sClient.Delete(ctx, hpa)).To(Succeed())
 
-			// The reconciler should restore it within one reconcile interval.
+			// The reconciler should restore it within one reconcile interval with a new UID.
 			recreated := &autoscalingv2.HorizontalPodAutoscaler{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, key, recreated)
-			}, testTimeout, testInterval).Should(Succeed(), "HPA should be self-healed")
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, key, recreated); err != nil {
+					return false
+				}
+				return recreated.UID != origUID
+			}, testTimeout, testInterval).Should(BeTrue(), "HPA should be self-healed with a new UID")
 
 			ad := &agentraxv1alpha1.AgentDeployment{}
 			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
