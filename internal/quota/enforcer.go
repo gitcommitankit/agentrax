@@ -238,7 +238,7 @@ func evalQuotaRules(
 			quota.MaxAgents, committedUsage.UsedAgents, inFlight.agents, deltaAgents,
 		)
 	}
-	if quota.MaxGPUs > 0 && projGPUs > quota.MaxGPUs && (!isUpdate || deltaGPUs > 0) {
+	if projGPUs > quota.MaxGPUs && (!isUpdate || deltaGPUs > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxGPUs (%d): current=%d in-flight=%d delta=%d",
 			quota.MaxGPUs, committedUsage.UsedGPUs, inFlight.gpus, deltaGPUs,
@@ -367,7 +367,7 @@ func (e *Enforcer) IsOverQuota(
 	if usage.UsedAgents > quota.MaxAgents {
 		return true, fmt.Sprintf("usedAgents (%d) exceeds maxAgents (%d)", usage.UsedAgents, quota.MaxAgents)
 	}
-	if quota.MaxGPUs > 0 && usage.UsedGPUs > quota.MaxGPUs {
+	if usage.UsedGPUs > quota.MaxGPUs {
 		return true, fmt.Sprintf("usedGPUs (%d) exceeds maxGPUs (%d)", usage.UsedGPUs, quota.MaxGPUs)
 	}
 	if usage.UsedTotalReplicas > quota.MaxTotalReplicas {

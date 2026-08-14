@@ -181,7 +181,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Return the shorter of the two requeue intervals.
 	statusResult, err := r.updateStatus(ctx, ad, logger, qs)
 	if err != nil {
-		return statusResult, err
+		return statusResult, fmt.Errorf("updating status: %w", err)
 	}
 	if hpaResult.RequeueAfter > 0 {
 		if statusResult.RequeueAfter == 0 || hpaResult.RequeueAfter < statusResult.RequeueAfter {
@@ -688,7 +688,11 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		Owns(&autoscalingv2.HorizontalPodAutoscaler{})
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Watches(
+			&agentraxv1alpha1.TenantQuota{},
+			enqueueAgentDeploymentsForTenantQuota(mgr.GetClient()),
+		)
 
 	if r.hasServiceMonitorCRD {
 		bldr = bldr.Owns(&monitoringv1.ServiceMonitor{})

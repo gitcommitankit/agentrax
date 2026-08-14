@@ -172,18 +172,14 @@ func parseScalarFromQueryResponse(body []byte) (float64, error) {
 
 	switch r.Data.ResultType {
 	case "scalar":
-		// Scalar result: Data.Result is a [timestamp, "value"] pair at index 0.
+		// Scalar result: Data.Result is a [timestamp, "value"] pair.
 		// Require exactly two elements to guard against a malformed payload;
 		// we read the value string from index 1 (index 0 is the Unix timestamp).
-		if len(r.Data.Result) == 0 {
-			return 0, fmt.Errorf("Prometheus scalar result is empty")
-		}
-		var pair [2]json.RawMessage
-		if err := json.Unmarshal(r.Data.Result[0], &pair); err != nil {
-			return 0, fmt.Errorf("decoding scalar value pair: %w", err)
+		if len(r.Data.Result) != 2 {
+			return 0, fmt.Errorf("Prometheus scalar result must contain exactly 2 elements, got %d", len(r.Data.Result))
 		}
 		var valStr string
-		if err := json.Unmarshal(pair[1], &valStr); err != nil {
+		if err := json.Unmarshal(r.Data.Result[1], &valStr); err != nil {
 			return 0, fmt.Errorf("decoding scalar value string: %w", err)
 		}
 		return strconv.ParseFloat(valStr, 64)

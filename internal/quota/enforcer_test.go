@@ -152,6 +152,21 @@ func TestCanAdmit_Create(t *testing.T) {
 			spec:      makeSpec(2, ""),    // no GPU requested → no increase
 			wantAdmit: true,
 		},
+		{
+			name:        "zero GPU quota rejects positive GPU request",
+			quota:       makeQuota(6, 0, 12, 6),
+			usage:       makeUsage(1, 0, 2),
+			spec:        makeSpec(2, "1"), // 1 GPU × 2 replicas = 2 > 0
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:      "zero GPU quota admits non-GPU request",
+			quota:     makeQuota(6, 0, 12, 6),
+			usage:     makeUsage(1, 0, 2),
+			spec:      makeSpec(2, ""), // 0 GPUs requested
+			wantAdmit: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -236,6 +251,47 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 	}
 	if !strings.Contains(reason3, "maxReplicasPerAgent") {
 		t.Errorf("denial reason %q should mention maxReplicasPerAgent", reason3)
+	}
+}
+
+// TestCanAdmit_Update_GPUCeiling verifies admission behavior when updating GPU requests or when GPU quota is reduced.
+func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+
+	// Zero GPU quota rejects increasing GPU allocation.
+	qZero := makeQuota(6, 0, 10, 6)
+	usage := makeUsage(1, 0, 2)
+	oldSpecNoGPU := makeSpec(2, "")
+	newSpecWithGPU := makeSpec(2, "1") // requests 2 GPUs when quota is 0
+	ok, reason := e.canAdmit("ns/ad-A", qZero, usage, newSpecWithGPU, &oldSpecNoGPU)
+	if ok {
+		t.Errorf("expected GPU request on zero-GPU quota to be rejected; got ok")
+	}
+	if !strings.Contains(reason, "maxGPUs") {
+		t.Errorf("expected reason to contain maxGPUs, got %q", reason)
+	}
+
+	// Lowering GPU quota below usage allows non-increasing updates.
+	qLow := makeQuota(6, 2, 10, 6)  // quota lowered to 2 GPUs
+	usageOver := makeUsage(1, 4, 2) // current usage is 4 GPUs (already over)
+	oldSpec4GPU := makeSpec(2, "2") // 2 GPU × 2 = 4 GPUs
+
+	// Update that doesn't increase GPUs (e.g. image change or same GPUs) is admitted.
+	sameGPU := makeSpec(2, "2")
+	ok2, reason2 := e.canAdmit("ns/ad-A", qLow, usageOver, sameGPU, &oldSpec4GPU)
+	if !ok2 {
+		t.Errorf("expected non-increasing GPU update to be admitted when over-quota; got reason: %q", reason2)
+	}
+
+	// Update that increases GPUs further is rejected.
+	moreGPU := makeSpec(3, "2") // 2 GPU × 3 = 6 GPUs (delta +2)
+	ok3, reason3 := e.canAdmit("ns/ad-A", qLow, usageOver, moreGPU, &oldSpec4GPU)
+	if ok3 {
+		t.Errorf("expected increasing GPU update when over-quota to be rejected")
+	}
+	if !strings.Contains(reason3, "maxGPUs") {
+		t.Errorf("expected reason to contain maxGPUs, got %q", reason3)
 	}
 }
 
@@ -443,24 +499,25 @@ func TestComputeUsage_Empty(t *testing.T) {
 func TestIsOverQuota(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
-	q := makeQuota(3, 4, 10, 3)
-
 	tests := []struct {
 		name    string
+		quota   agentraxv1alpha1.TenantQuotaSpec
 		usage   agentraxv1alpha1.TenantQuotaStatus
 		wantOQ  bool
 		wantMsg string
 	}{
-		{"within limits", makeUsage(2, 3, 8), false, ""},
-		{"agents over", makeUsage(4, 3, 8), true, "maxAgents"},
-		{"GPUs over", makeUsage(2, 5, 8), true, "maxGPUs"},
-		{"replicas over", makeUsage(2, 3, 11), true, "maxTotalReplicas"},
+		{"within limits", makeQuota(3, 4, 10, 3), makeUsage(2, 3, 8), false, ""},
+		{"agents over", makeQuota(3, 4, 10, 3), makeUsage(4, 3, 8), true, "maxAgents"},
+		{"GPUs over", makeQuota(3, 4, 10, 3), makeUsage(2, 5, 8), true, "maxGPUs"},
+		{"replicas over", makeQuota(3, 4, 10, 3), makeUsage(2, 3, 11), true, "maxTotalReplicas"},
+		{"zero GPU quota with used GPUs over", makeQuota(3, 0, 10, 3), makeUsage(2, 1, 8), true, "maxGPUs"},
+		{"zero GPU quota with 0 used GPUs ok", makeQuota(3, 0, 10, 3), makeUsage(2, 0, 8), false, ""},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			over, msg := e.IsOverQuota(q, tc.usage)
+			over, msg := e.IsOverQuota(tc.quota, tc.usage)
 			if over != tc.wantOQ {
 				t.Errorf("IsOverQuota() = %v, want %v; msg=%q", over, tc.wantOQ, msg)
 			}

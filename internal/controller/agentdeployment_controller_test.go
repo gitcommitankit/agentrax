@@ -755,6 +755,11 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 		})
 
 		It("sets the HPA owner reference to the AgentDeployment", func() {
+			parent := &agentraxv1alpha1.AgentDeployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, parent)
+			}, testTimeout, testInterval).Should(Succeed())
+
 			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, key, hpa)
@@ -763,6 +768,7 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			Expect(hpa.OwnerReferences).To(HaveLen(1))
 			Expect(hpa.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
 			Expect(hpa.OwnerReferences[0].Name).To(Equal(key.Name))
+			Expect(hpa.OwnerReferences[0].UID).To(Equal(parent.UID))
 			Expect(hpa.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*hpa.OwnerReferences[0].Controller).To(BeTrue())
 		})
@@ -952,15 +958,13 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 
 			// Verify QuotaLimited condition is NOT True — max=5 is within headroom of 10.
 			// Use Consistently so a transient True that later settles does not go undetected.
-			Consistently(func() bool {
+			Consistently(func(g Gomega) {
 				latest := &agentraxv1alpha1.AgentDeployment{}
-				if err := k8sClient.Get(ctx, key, latest); err != nil {
-					return false // treat Get error as not-True; outer Eventually guards timing
-				}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
 				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
-				return c != nil && c.Status == metav1.ConditionTrue
-			}, 3*time.Second, testInterval).Should(BeFalse(),
-				"QuotaLimited should never be True when max (5) <= headroom (10)")
+				g.Expect(c != nil && c.Status == metav1.ConditionTrue).To(BeFalse(),
+					"QuotaLimited should never be True when max (5) <= headroom (10)")
+			}, 3*time.Second, testInterval).Should(Succeed())
 		})
 	})
 
@@ -1036,16 +1040,6 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			patch.Spec.MaxReplicasPerAgent = 2
 			patch.Spec.MaxTotalReplicas = 2
 			Expect(k8sClient.Patch(ctx, patch, client.MergeFrom(tq))).To(Succeed())
-
-			// Trigger a reconcile by patching the AD (no-op label change).
-			ad := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
-			adPatch := ad.DeepCopy()
-			if adPatch.Labels == nil {
-				adPatch.Labels = make(map[string]string)
-			}
-			adPatch.Labels["agentrax.io/reconcile-trigger"] = "quota-lower"
-			Expect(k8sClient.Patch(ctx, adPatch, client.MergeFrom(ad))).To(Succeed())
 
 			// HPA maxReplicas must be reduced to the new quota ceiling (2).
 			Eventually(func() int32 {
