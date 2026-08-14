@@ -828,9 +828,20 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			Expect(k8sClient.Delete(ctx, hpa)).To(Succeed())
 
 			// The reconciler should restore it within one reconcile interval.
+			recreated := &autoscalingv2.HorizontalPodAutoscaler{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{})
+				return k8sClient.Get(ctx, key, recreated)
 			}, testTimeout, testInterval).Should(Succeed(), "HPA should be self-healed")
+
+			ad := &agentraxv1alpha1.AgentDeployment{}
+			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+
+			Expect(recreated.OwnerReferences).To(HaveLen(1))
+			Expect(recreated.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(recreated.OwnerReferences[0].Name).To(Equal(key.Name))
+			Expect(recreated.OwnerReferences[0].UID).To(Equal(ad.UID))
+			Expect(recreated.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*recreated.OwnerReferences[0].Controller).To(BeTrue())
 		})
 	})
 
@@ -1016,9 +1027,17 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			// Delete the TenantQuota so each It block starts from a clean slate.
 			// Without this, the first It (which lowers the ceiling) bleeds state
 			// into the next BeforeEach, causing webhook rejection on the AD create.
+			tqKey := namespacedName("team-quota-test", nsName)
 			tq := &agentraxv1alpha1.TenantQuota{}
-			if err := k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), tq); err == nil {
+			if err := k8sClient.Get(ctx, tqKey, tq); err != nil {
+				if !apierrors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+			} else {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, tq))).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, tqKey, &agentraxv1alpha1.TenantQuota{}))
+				}, testTimeout, testInterval).Should(BeTrue(), "TenantQuota should be deleted")
 			}
 		})
 
