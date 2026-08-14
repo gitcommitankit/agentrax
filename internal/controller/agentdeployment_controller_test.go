@@ -925,9 +925,11 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 
 			Expect(hpa.Spec.Behavior).NotTo(BeNil())
 			Expect(hpa.Spec.Behavior.ScaleUp).NotTo(BeNil())
-			Expect(hpa.Spec.Behavior.ScaleDown).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).NotTo(BeNil())
 			Expect(*hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).To(Equal(int32(60)),
 				"scale-up stabilization should be 60s")
+			Expect(hpa.Spec.Behavior.ScaleDown).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).NotTo(BeNil())
 			Expect(*hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).To(Equal(int32(300)),
 				"scale-down stabilization should be 300s")
 		})
