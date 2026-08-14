@@ -126,6 +126,7 @@ var _ webhook.CustomValidator = &AgentDeploymentCustomValidator{}
 
 // ValidateCreate validates a new AgentDeployment against quota and spec rules.
 func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	start := time.Now()
 	ad, ok := obj.(*agentraxv1alpha1.AgentDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected AgentDeployment, got %T", obj)
@@ -133,6 +134,22 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 	webhookLog.Info("validating create", "name", ad.Name, "namespace", ad.Namespace)
 
 	allErrs := v.validateSpec(ctx, ad, nil)
+
+	latency := time.Since(start)
+	webhookLog.V(1).Info("admission complete",
+		"operation", "create",
+		"name", ad.Name,
+		"namespace", ad.Namespace,
+		"latency_ms", latency.Milliseconds(),
+		"admitted", len(allErrs) == 0)
+	if latency > 2*time.Second {
+		webhookLog.Info("slow admission request detected",
+			"operation", "create",
+			"name", ad.Name,
+			"namespace", ad.Namespace,
+			"latency_ms", latency.Milliseconds())
+	}
+
 	if len(allErrs) > 0 {
 		return nil, apierrors.NewInvalid(
 			agentraxv1alpha1.GroupVersion.WithKind("AgentDeployment").GroupKind(),
@@ -143,6 +160,7 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 
 // ValidateUpdate validates an updated AgentDeployment against quota and spec rules.
 func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	start := time.Now()
 	ad, ok := newObj.(*agentraxv1alpha1.AgentDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected AgentDeployment, got %T", newObj)
@@ -172,6 +190,22 @@ func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 	}
 
 	allErrs := v.validateSpec(ctx, ad, &oldAD.Spec)
+
+	latency := time.Since(start)
+	webhookLog.V(1).Info("admission complete",
+		"operation", "update",
+		"name", ad.Name,
+		"namespace", ad.Namespace,
+		"latency_ms", latency.Milliseconds(),
+		"admitted", len(allErrs) == 0)
+	if latency > 2*time.Second {
+		webhookLog.Info("slow admission request detected",
+			"operation", "update",
+			"name", ad.Name,
+			"namespace", ad.Namespace,
+			"latency_ms", latency.Milliseconds())
+	}
+
 	if len(allErrs) > 0 {
 		return nil, apierrors.NewInvalid(
 			agentraxv1alpha1.GroupVersion.WithKind("AgentDeployment").GroupKind(),

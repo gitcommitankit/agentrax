@@ -100,18 +100,19 @@ func BuildHPA(ad *agentraxv1alpha1.AgentDeployment, quotaHeadroom int32) *autosc
 					External: &autoscalingv2.ExternalMetricSource{
 						Metric: autoscalingv2.MetricIdentifier{
 							Name: metricName,
-							// Scope the metric to this specific AgentDeployment
-							// so Prometheus Adapter can filter by pod labels.
+							// Scope the metric to this specific AgentDeployment.
+							// Prometheus sanitizes label names with dots to underscores,
+							// so use the sanitized forms that match what's in storage.
 							Selector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"app.kubernetes.io/name":       ad.Name,
-									"app.kubernetes.io/managed-by": "agentrax",
+									"app_kubernetes_io_name":       ad.Name,
+									"app_kubernetes_io_managed_by": "agentrax",
 								},
 							},
 						},
 						Target: autoscalingv2.MetricTarget{
-							Type:         autoscalingv2.AverageValueMetricType,
-							AverageValue: targetValue,
+							Type:  autoscalingv2.ValueMetricType,
+							Value: targetValue,
 						},
 					},
 				},

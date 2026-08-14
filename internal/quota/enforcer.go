@@ -186,7 +186,16 @@ func (e *Enforcer) CanAdmit(
 	delta := e.computeDelta(requested, oldSpec)
 	inFlight := e.sumInflight(admissionKey)
 	return evalQuotaRules(quota, committedUsage, inFlight, delta,
-		requested.Replicas.Max, oldSpec != nil, oldMax(oldSpec))
+		requested.Replicas.Max, sameTenantUpdate(requested, oldSpec), oldMax(oldSpec))
+}
+
+// sameTenantUpdate returns true for UPDATE operations where the tenant has not changed.
+// Returns false for CREATE (oldSpec == nil) or cross-tenant moves.
+func sameTenantUpdate(requested agentraxv1alpha1.AgentDeploymentSpec, oldSpec *agentraxv1alpha1.AgentDeploymentSpec) bool {
+	if oldSpec == nil {
+		return false
+	}
+	return requested.TenantRef == oldSpec.TenantRef
 }
 
 // computeDelta returns the resource delta for this admission request.
@@ -315,7 +324,7 @@ func (e *Enforcer) AdmitAndReserve(
 	inFlight := e.sumInflightLocked(admissionKey, now)
 
 	ok, reason := evalQuotaRules(quota, committedUsage, inFlight, delta,
-		requested.Replicas.Max, oldSpec != nil, oldMax(oldSpec))
+		requested.Replicas.Max, sameTenantUpdate(requested, oldSpec), oldMax(oldSpec))
 	if !ok {
 		return false, reason
 	}

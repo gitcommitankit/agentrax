@@ -639,9 +639,10 @@ func (r *AgentDeploymentReconciler) desiredService(ad *agentraxv1alpha1.AgentDep
 
 // desiredServiceMonitor builds the ServiceMonitor spec that scrapes /metrics on the agent pods.
 // TargetLabels propagates app.kubernetes.io/name and app.kubernetes.io/managed-by from the
-// Service object into every Prometheus sample. The Prometheus Adapter's externalRules
-// metricsQuery expands <<.LabelMatchers>> to those exact label keys from the HPA metric
-// selector — without TargetLabels the selector would match zero samples and scaling stalls.
+// Service object into every Prometheus sample. Prometheus sanitizes these label names
+// (dots become underscores: app_kubernetes_io_name, app_kubernetes_io_managed_by) before
+// storage, and the HPA metric selector and Prometheus Adapter query reference the sanitized
+// forms to match the stored labels.
 func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.AgentDeployment) *monitoringv1.ServiceMonitor {
 	labels := agentLabels(ad)
 
@@ -656,7 +657,8 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 				MatchLabels: labels,
 			},
 			// Carry the two labels used by the HPA ExternalMetric selector into
-			// every scraped sample so the Prometheus Adapter query can filter by them.
+			// every scraped sample. Prometheus will sanitize the dots to underscores
+			// during ingestion (app.kubernetes.io/name → app_kubernetes_io_name).
 			TargetLabels: []string{
 				"app.kubernetes.io/name",
 				"app.kubernetes.io/managed-by",

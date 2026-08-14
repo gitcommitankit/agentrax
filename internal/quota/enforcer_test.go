@@ -257,41 +257,60 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 // TestCanAdmit_Update_GPUCeiling verifies admission behavior when updating GPU requests or when GPU quota is reduced.
 func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 	t.Parallel()
-	e := newTestEnforcer(t)
 
-	// Zero GPU quota rejects increasing GPU allocation.
-	qZero := makeQuota(6, 0, 10, 6)
-	usage := makeUsage(1, 0, 2)
-	oldSpecNoGPU := makeSpec(2, "")
-	newSpecWithGPU := makeSpec(2, "1") // requests 2 GPUs when quota is 0
-	ok, reason := e.CanAdmit("ns/ad-A", qZero, usage, newSpecWithGPU, &oldSpecNoGPU)
-	if ok {
-		t.Errorf("expected GPU request on zero-GPU quota to be rejected; got ok")
-	}
-	if !strings.Contains(reason, "maxGPUs") {
-		t.Errorf("expected reason to contain maxGPUs, got %q", reason)
+	tests := []struct {
+		name        string
+		quota       agentraxv1alpha1.TenantQuotaSpec
+		usage       agentraxv1alpha1.TenantQuotaStatus
+		oldSpec     agentraxv1alpha1.AgentDeploymentSpec
+		newSpec     agentraxv1alpha1.AgentDeploymentSpec
+		wantAdmit   bool
+		wantContain string
+	}{
+		{
+			name:        "zero quota rejects increasing GPU allocation",
+			quota:       makeQuota(6, 0, 10, 6),
+			usage:       makeUsage(1, 0, 2),
+			oldSpec:     makeSpec(2, ""),
+			newSpec:     makeSpec(2, "1"), // requests 2 GPUs when quota is 0
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:        "non-increasing GPU update when over-quota is admitted",
+			quota:       makeQuota(6, 2, 10, 6), // quota lowered to 2 GPUs
+			usage:       makeUsage(1, 4, 2),     // current usage is 4 GPUs (already over)
+			oldSpec:     makeSpec(2, "2"),       // 2 GPU × 2 = 4 GPUs
+			newSpec:     makeSpec(2, "2"),       // same GPUs
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:        "increasing GPU update when over-quota is rejected",
+			quota:       makeQuota(6, 2, 10, 6), // quota lowered to 2 GPUs
+			usage:       makeUsage(1, 4, 2),     // current usage is 4 GPUs (already over)
+			oldSpec:     makeSpec(2, "2"),       // 2 GPU × 2 = 4 GPUs
+			newSpec:     makeSpec(3, "2"),       // 2 GPU × 3 = 6 GPUs (delta +2)
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
 	}
 
-	// Lowering GPU quota below usage allows non-increasing updates.
-	qLow := makeQuota(6, 2, 10, 6)  // quota lowered to 2 GPUs
-	usageOver := makeUsage(1, 4, 2) // current usage is 4 GPUs (already over)
-	oldSpec4GPU := makeSpec(2, "2") // 2 GPU × 2 = 4 GPUs
-
-	// Update that doesn't increase GPUs (e.g. image change or same GPUs) is admitted.
-	sameGPU := makeSpec(2, "2")
-	ok2, reason2 := e.CanAdmit("ns/ad-A", qLow, usageOver, sameGPU, &oldSpec4GPU)
-	if !ok2 {
-		t.Errorf("expected non-increasing GPU update to be admitted when over-quota; got reason: %q", reason2)
-	}
-
-	// Update that increases GPUs further is rejected.
-	moreGPU := makeSpec(3, "2") // 2 GPU × 3 = 6 GPUs (delta +2)
-	ok3, reason3 := e.CanAdmit("ns/ad-A", qLow, usageOver, moreGPU, &oldSpec4GPU)
-	if ok3 {
-		t.Errorf("expected increasing GPU update when over-quota to be rejected")
-	}
-	if !strings.Contains(reason3, "maxGPUs") {
-		t.Errorf("expected reason to contain maxGPUs, got %q", reason3)
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnforcer(t)
+			got, reason := e.CanAdmit("ns/ad-A", tc.quota, tc.usage, tc.newSpec, &tc.oldSpec)
+			if got != tc.wantAdmit {
+				t.Errorf("CanAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
+			}
+			if !tc.wantAdmit && tc.wantContain != "" {
+				if !strings.Contains(reason, tc.wantContain) {
+					t.Errorf("expected reason to contain %q, got %q", tc.wantContain, reason)
+				}
+			}
+		})
 	}
 }
 
@@ -304,85 +323,118 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 		oldTenant    = "old-tenant"
 		targetTenant = "target-tenant"
 	)
-	e := newTestEnforcer(t)
 
-	// Target tenant quota is already at capacity (no room for a delta).
-	targetQuota := makeQuota(2, 4, 6, 4) // maxAgents=2, maxGPUs=4, maxTotalReplicas=6
-	targetUsage := makeUsage(2, 4, 6)    // already at full capacity
-
-	// Old spec was in a different tenant ("old-tenant").
-	oldSpec := makeSpec(3, "1") // 3 replicas, 1 GPU per replica = 3 GPUs total
-	oldSpec.TenantRef = oldTenant
-
-	// New spec moves to "target-tenant" with same resources.
-	newSpec := makeSpec(3, "1") // same resources: 3 replicas, 3 GPUs
-	newSpec.TenantRef = targetTenant
-
-	// The target tenant is already at capacity. Since this is a cross-tenant
-	// move, the full amount (1 agent, 3 GPUs, 3 replicas) should be charged
-	// to the target tenant, not a delta. This should be rejected because the
-	// target quota cannot accommodate the full allocation.
-	ok, reason := e.CanAdmit("ns/ad-move", targetQuota, targetUsage, newSpec, &oldSpec)
-	if ok {
-		t.Errorf("expected cross-tenant move into full quota to be rejected; got admitted")
+	tests := []struct {
+		name        string
+		quota       agentraxv1alpha1.TenantQuotaSpec
+		usage       agentraxv1alpha1.TenantQuotaStatus
+		oldSpec     agentraxv1alpha1.AgentDeploymentSpec
+		newSpec     agentraxv1alpha1.AgentDeploymentSpec
+		wantAdmit   bool
+		wantContain string
+	}{
+		{
+			name:  "cross-tenant move into full quota is rejected",
+			quota: makeQuota(2, 4, 6, 4), // maxAgents=2, maxGPUs=4, maxTotalReplicas=6
+			usage: makeUsage(2, 4, 6),    // already at full capacity
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // 3 replicas, 1 GPU per replica = 3 GPUs total
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // same resources: 3 replicas, 3 GPUs
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxAgents",
+		},
+		{
+			name:  "cross-tenant move into quota with capacity is admitted",
+			quota: makeQuota(3, 8, 10, 4), // enough room: maxAgents=3, maxGPUs=8, maxTotalReplicas=10
+			usage: makeUsage(1, 2, 4),     // current: 1 agent, 2 GPUs, 4 replicas
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // 3 replicas, 3 GPUs
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // same resources
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:  "cross-tenant move with resource increase when quota allows",
+			quota: makeQuota(3, 5, 8, 5),
+			usage: makeUsage(1, 1, 2), // 1 agent, 1 GPU, 2 replicas
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(2, "1") // 2 replicas, 2 GPUs
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(4, "1") // 4 replicas, 4 GPUs
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:  "cross-tenant move into insufficient GPU quota is rejected",
+			quota: makeQuota(3, 4, 8, 5), // maxGPUs=4 (too low for +4)
+			usage: makeUsage(1, 1, 2),
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(2, "1")
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(4, "1") // 4 GPUs needed
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:  "cross-tenant move of 8-replica workload into tenant with maxReplicasPerAgent=2 is rejected",
+			quota: makeQuota(5, 10, 20, 2), // maxReplicasPerAgent=2
+			usage: makeUsage(1, 0, 5),
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(8, "") // 8 replicas
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(8, "") // 8 replicas
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxReplicasPerAgent",
+		},
 	}
-	// Should fail on agents limit since target is at 2/2 and we need +1.
-	if !strings.Contains(reason, "maxAgents") {
-		t.Errorf("expected reason to mention maxAgents, got %q", reason)
-	}
 
-	// Test case 2: Target tenant has enough room for the full allocation.
-	targetQuota2 := makeQuota(3, 8, 10, 4) // enough room: maxAgents=3, maxGPUs=8, maxTotalReplicas=10
-	targetUsage2 := makeUsage(1, 2, 4)     // current: 1 agent, 2 GPUs, 4 replicas
-
-	oldSpec2 := makeSpec(3, "1") // 3 replicas, 3 GPUs
-	oldSpec2.TenantRef = oldTenant
-
-	newSpec2 := makeSpec(3, "1") // same resources
-	newSpec2.TenantRef = targetTenant
-
-	// Target can accommodate: 1+1=2 ≤ 3 agents, 2+3=5 ≤ 8 GPUs, 4+3=7 ≤ 10 replicas.
-	ok2, reason2 := e.CanAdmit("ns/ad-move2", targetQuota2, targetUsage2, newSpec2, &oldSpec2)
-	if !ok2 {
-		t.Errorf("expected cross-tenant move into quota with capacity to be admitted; got reason: %q", reason2)
-	}
-
-	// Test case 3: Cross-tenant move with resource change (increase).
-	// Old spec: different tenant, 2 replicas, 2 GPUs.
-	oldSpec3 := makeSpec(2, "1")
-	oldSpec3.TenantRef = oldTenant
-
-	// New spec: target tenant, 4 replicas, 4 GPUs.
-	newSpec3 := makeSpec(4, "1")
-	newSpec3.TenantRef = targetTenant
-
-	targetQuota3 := makeQuota(3, 5, 8, 5)
-	targetUsage3 := makeUsage(1, 1, 2) // 1 agent, 1 GPU, 2 replicas
-
-	// Should charge FULL new amount: +1 agent, +4 GPUs, +4 replicas.
-	// Result: 2 agents ≤ 3, 5 GPUs ≤ 5, 6 replicas ≤ 8 → should be admitted.
-	ok3, reason3 := e.CanAdmit("ns/ad-move3", targetQuota3, targetUsage3, newSpec3, &oldSpec3)
-	if !ok3 {
-		t.Errorf("expected cross-tenant move with resource increase to be admitted when quota allows; got reason: %q", reason3)
-	}
-
-	// Test case 4: Same scenario but quota is too tight for the full allocation.
-	targetQuota4 := makeQuota(3, 4, 8, 5) // maxGPUs=4 (too low for +4)
-	targetUsage4 := makeUsage(1, 1, 2)
-
-	oldSpec4 := makeSpec(2, "1")
-	oldSpec4.TenantRef = oldTenant
-
-	newSpec4 := makeSpec(4, "1") // 4 GPUs needed
-	newSpec4.TenantRef = targetTenant
-
-	// 1 + 4 = 5 GPUs > 4 → should be rejected.
-	ok4, reason4 := e.CanAdmit("ns/ad-move4", targetQuota4, targetUsage4, newSpec4, &oldSpec4)
-	if ok4 {
-		t.Errorf("expected cross-tenant move into insufficient GPU quota to be rejected")
-	}
-	if !strings.Contains(reason4, "maxGPUs") {
-		t.Errorf("expected reason to mention maxGPUs, got %q", reason4)
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnforcer(t)
+			got, reason := e.CanAdmit("ns/ad-move", tc.quota, tc.usage, tc.newSpec, &tc.oldSpec)
+			if got != tc.wantAdmit {
+				t.Errorf("CanAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
+			}
+			if !tc.wantAdmit && tc.wantContain != "" {
+				if !strings.Contains(reason, tc.wantContain) {
+					t.Errorf("expected reason to contain %q, got %q", tc.wantContain, reason)
+				}
+			}
+		})
 	}
 }
 

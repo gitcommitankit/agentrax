@@ -30,13 +30,14 @@ data:
       # Exposes agentrax_queue_depth via external.metrics.k8s.io, which is the
       # API group queried by HPAs using ExternalMetricSourceType (the type
       # BuildHPA produces). The <<.LabelMatchers>> template is populated by the
-      # Prometheus Adapter from the HPA metric selector (app.kubernetes.io/name
-      # and app.kubernetes.io/managed-by), scoping the query to one agent only.
+      # Prometheus Adapter from the HPA metric selector. Prometheus sanitizes
+      # label names (app.kubernetes.io/name → app_kubernetes_io_name), so the
+      # query references the sanitized forms that actually exist in storage.
       - seriesQuery: 'agentrax_queue_depth{namespace!=""}'
         name:
           matches: "^agentrax_queue_depth$"
           as: "agentrax_queue_depth"
-        metricsQuery: 'avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+        metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
 
       # ── gpuUtilization ────────────────────────────────────────────────────────
       # Exposes agentrax_gpu_utilization via external.metrics.k8s.io.
@@ -47,4 +48,4 @@ data:
         name:
           matches: "^agentrax_gpu_utilization$"
           as: "agentrax_gpu_utilization"
-        metricsQuery: 'avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+        metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
