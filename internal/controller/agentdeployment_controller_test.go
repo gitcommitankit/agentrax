@@ -963,13 +963,11 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 
 			// Expect the HPA to be updated to maxReplicas=5
 			// (quota headroom in tests is maxReplicasPerAgent=10, so no capping).
-			Eventually(func() int32 {
+			Eventually(func(g Gomega) {
 				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-				if err := k8sClient.Get(ctx, key, hpa); err != nil {
-					return 0
-				}
-				return hpa.Spec.MaxReplicas
-			}, testTimeout, testInterval).Should(Equal(int32(5)))
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			}, testTimeout, testInterval).Should(Succeed())
 
 			// Verify QuotaLimited condition is NOT True — max=5 is within headroom of 10.
 			// Use Consistently so a transient True that later settles does not go undetected.
@@ -1054,13 +1052,11 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 
 		It("caps HPA maxReplicas and sets QuotaLimited condition when quota is lowered", func() {
 			// Wait for initial HPA with maxReplicas=5 (uncapped).
-			Eventually(func() int32 {
+			Eventually(func(g Gomega) {
 				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-				if err := k8sClient.Get(ctx, key, hpa); err != nil {
-					return 0
-				}
-				return hpa.Spec.MaxReplicas
-			}, testTimeout, testInterval).Should(Equal(int32(5)))
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			}, testTimeout, testInterval).Should(Succeed())
 
 			// Lower the TenantQuota ceiling to maxReplicasPerAgent=2, maxTotalReplicas=2.
 			// This causes the reconciler to cap HPA.maxReplicas at 2 and set QuotaLimited.
@@ -1072,27 +1068,21 @@ var _ = Describe("AgentDeployment HPA lifecycle", func() {
 			Expect(k8sClient.Patch(ctx, patch, client.MergeFrom(tq))).To(Succeed())
 
 			// HPA maxReplicas must be reduced to the new quota ceiling (2).
-			Eventually(func() int32 {
+			Eventually(func(g Gomega) {
 				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-				if err := k8sClient.Get(ctx, key, hpa); err != nil {
-					return 0
-				}
-				return hpa.Spec.MaxReplicas
-			}, testTimeout, testInterval).Should(Equal(int32(2)),
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(2)))
+			}, testTimeout, testInterval).Should(Succeed(),
 				"HPA maxReplicas should be capped at the new quota ceiling")
 
 			// QuotaLimited condition must be True because spec.max (5) > headroom (2).
-			Eventually(func() metav1.ConditionStatus {
+			Eventually(func(g Gomega) {
 				latest := &agentraxv1alpha1.AgentDeployment{}
-				if err := k8sClient.Get(ctx, key, latest); err != nil {
-					return metav1.ConditionUnknown
-				}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
 				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
-				if c == nil {
-					return metav1.ConditionUnknown
-				}
-				return c.Status
-			}, testTimeout, testInterval).Should(Equal(metav1.ConditionTrue),
+				g.Expect(c).NotTo(BeNil())
+				g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			}, testTimeout, testInterval).Should(Succeed(),
 				"QuotaLimited condition should be True when HPA is capped by quota")
 		})
 
