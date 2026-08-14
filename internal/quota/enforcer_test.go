@@ -295,6 +295,93 @@ func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update_CrossTenantMove verifies that when an AgentDeployment
+// moves from one tenant to another (TenantRef changes), the full requested
+// resources are charged to the target tenant's quota, not a delta.
+func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+
+	// Target tenant quota is already at capacity (no room for a delta).
+	targetQuota := makeQuota(2, 4, 6, 4) // maxAgents=2, maxGPUs=4, maxTotalReplicas=6
+	targetUsage := makeUsage(2, 4, 6)    // already at full capacity
+
+	// Old spec was in a different tenant ("old-tenant").
+	oldSpec := makeSpec(3, "1") // 3 replicas, 1 GPU per replica = 3 GPUs total
+	oldSpec.TenantRef = "old-tenant"
+
+	// New spec moves to "target-tenant" with same resources.
+	newSpec := makeSpec(3, "1") // same resources: 3 replicas, 3 GPUs
+	newSpec.TenantRef = "target-tenant"
+
+	// The target tenant is already at capacity. Since this is a cross-tenant
+	// move, the full amount (1 agent, 3 GPUs, 3 replicas) should be charged
+	// to the target tenant, not a delta. This should be rejected because the
+	// target quota cannot accommodate the full allocation.
+	ok, reason := e.CanAdmit("ns/ad-move", targetQuota, targetUsage, newSpec, &oldSpec)
+	if ok {
+		t.Errorf("expected cross-tenant move into full quota to be rejected; got admitted")
+	}
+	// Should fail on agents limit since target is at 2/2 and we need +1.
+	if !strings.Contains(reason, "maxAgents") {
+		t.Errorf("expected reason to mention maxAgents, got %q", reason)
+	}
+
+	// Test case 2: Target tenant has enough room for the full allocation.
+	targetQuota2 := makeQuota(3, 8, 10, 4) // enough room: maxAgents=3, maxGPUs=8, maxTotalReplicas=10
+	targetUsage2 := makeUsage(1, 2, 4)     // current: 1 agent, 2 GPUs, 4 replicas
+
+	oldSpec2 := makeSpec(3, "1") // 3 replicas, 3 GPUs
+	oldSpec2.TenantRef = "old-tenant"
+
+	newSpec2 := makeSpec(3, "1") // same resources
+	newSpec2.TenantRef = "target-tenant"
+
+	// Target can accommodate: 1+1=2 ≤ 3 agents, 2+3=5 ≤ 8 GPUs, 4+3=7 ≤ 10 replicas.
+	ok2, reason2 := e.CanAdmit("ns/ad-move2", targetQuota2, targetUsage2, newSpec2, &oldSpec2)
+	if !ok2 {
+		t.Errorf("expected cross-tenant move into quota with capacity to be admitted; got reason: %q", reason2)
+	}
+
+	// Test case 3: Cross-tenant move with resource change (increase).
+	// Old spec: different tenant, 2 replicas, 2 GPUs.
+	oldSpec3 := makeSpec(2, "1")
+	oldSpec3.TenantRef = "old-tenant"
+
+	// New spec: target tenant, 4 replicas, 4 GPUs.
+	newSpec3 := makeSpec(4, "1")
+	newSpec3.TenantRef = "target-tenant"
+
+	targetQuota3 := makeQuota(3, 5, 8, 5)
+	targetUsage3 := makeUsage(1, 1, 2) // 1 agent, 1 GPU, 2 replicas
+
+	// Should charge FULL new amount: +1 agent, +4 GPUs, +4 replicas.
+	// Result: 2 agents ≤ 3, 5 GPUs ≤ 5, 6 replicas ≤ 8 → should be admitted.
+	ok3, reason3 := e.CanAdmit("ns/ad-move3", targetQuota3, targetUsage3, newSpec3, &oldSpec3)
+	if !ok3 {
+		t.Errorf("expected cross-tenant move with resource increase to be admitted when quota allows; got reason: %q", reason3)
+	}
+
+	// Test case 4: Same scenario but quota is too tight for the full allocation.
+	targetQuota4 := makeQuota(3, 4, 8, 5) // maxGPUs=4 (too low for +4)
+	targetUsage4 := makeUsage(1, 1, 2)
+
+	oldSpec4 := makeSpec(2, "1")
+	oldSpec4.TenantRef = "old-tenant"
+
+	newSpec4 := makeSpec(4, "1") // 4 GPUs needed
+	newSpec4.TenantRef = "target-tenant"
+
+	// 1 + 4 = 5 GPUs > 4 → should be rejected.
+	ok4, reason4 := e.CanAdmit("ns/ad-move4", targetQuota4, targetUsage4, newSpec4, &oldSpec4)
+	if ok4 {
+		t.Errorf("expected cross-tenant move into insufficient GPU quota to be rejected")
+	}
+	if !strings.Contains(reason4, "maxGPUs") {
+		t.Errorf("expected reason to mention maxGPUs, got %q", reason4)
+	}
+}
+
 // ── In-flight reservation tests ───────────────────────────────────────────────
 
 // TestReservation_BlocksConcurrentCreate verifies that an in-flight reservation blocks concurrent creation of the same remaining slot.

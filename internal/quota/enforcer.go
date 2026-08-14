@@ -191,18 +191,31 @@ func (e *Enforcer) CanAdmit(
 
 // computeDelta returns the resource delta for this admission request.
 // For CREATE (oldSpec == nil): the full resources of one new agent.
-// For UPDATE: only the incremental change relative to the previous spec.
+// For UPDATE with same TenantRef: only the incremental change relative to the previous spec.
+// For UPDATE with different TenantRef (tenant move): the FULL requested resources,
+// because the old allocation was never charged against the new tenant's quota.
 func (e *Enforcer) computeDelta(
 	requested agentraxv1alpha1.AgentDeploymentSpec,
 	oldSpec *agentraxv1alpha1.AgentDeploymentSpec,
 ) reservationEntry {
 	if oldSpec == nil {
+		// CREATE: charge full amount
 		return reservationEntry{
 			agents:   1,
 			gpus:     e.gpusForAD(requested),
 			replicas: requested.Replicas.Max,
 		}
 	}
+	// UPDATE: check if tenant changed
+	if requested.TenantRef != oldSpec.TenantRef {
+		// Cross-tenant move: charge full amount to the new tenant
+		return reservationEntry{
+			agents:   1,
+			gpus:     e.gpusForAD(requested),
+			replicas: requested.Replicas.Max,
+		}
+	}
+	// Same tenant: charge only the delta
 	return reservationEntry{
 		agents:   0,
 		gpus:     e.gpusForAD(requested) - e.gpusForAD(*oldSpec),
