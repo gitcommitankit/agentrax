@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // White-box test: package quota (not quota_test) so unexported methods
-// canAdmit and reserve are accessible for isolated unit testing.
+// like reserve are accessible for isolated unit testing.
 // AdmitAndReserve remains the production-facing atomic API.
 package quota
 
@@ -85,7 +85,7 @@ func newTestEnforcer(t *testing.T) *Enforcer {
 	return e
 }
 
-// ── canAdmit tests ────────────────────────────────────────────────────────────
+// ── CanAdmit tests ────────────────────────────────────────────────────────────
 
 // TestCanAdmit_Create verifies admission decisions for new AgentDeployment creates against various quota scenarios.
 func TestCanAdmit_Create(t *testing.T) {
@@ -174,15 +174,15 @@ func TestCanAdmit_Create(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestEnforcer(t)
-			got, reason := e.canAdmit("ns/ad-test", tc.quota, tc.usage, tc.spec, nil)
+			got, reason := e.CanAdmit("ns/ad-test", tc.quota, tc.usage, tc.spec, nil)
 			if got != tc.wantAdmit {
-				t.Errorf("canAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
+				t.Errorf("CanAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
 			}
 			if !tc.wantAdmit && tc.wantContain != "" {
 				if reason == "" {
-					t.Errorf("canAdmit() denied but returned empty reason")
+					t.Errorf("CanAdmit() denied but returned empty reason")
 				} else if !strings.Contains(reason, tc.wantContain) {
-					t.Errorf("canAdmit() reason %q does not contain %q", reason, tc.wantContain)
+					t.Errorf("CanAdmit() reason %q does not contain %q", reason, tc.wantContain)
 				}
 			}
 		})
@@ -197,21 +197,21 @@ func TestCanAdmit_Update(t *testing.T) {
 	usage := makeUsage(2, 0, 8)
 	oldSpec := makeSpec(4, "")
 	newSpec := makeSpec(5, "") // delta replicas = +1; 8+1=9 ≤ 10 → ok
-	ok, reason := e.canAdmit("ns/ad-A", q, usage, newSpec, &oldSpec)
+	ok, reason := e.CanAdmit("ns/ad-A", q, usage, newSpec, &oldSpec)
 	if !ok {
 		t.Errorf("expected update to be admitted but got reason: %q", reason)
 	}
 
 	// Delta that hits the ceiling exactly → ok.
 	newSpec2 := makeSpec(6, "") // delta replicas = +2; 8+2=10 ≤ 10 → ok
-	ok2, _ := e.canAdmit("ns/ad-A", q, usage, newSpec2, &oldSpec)
+	ok2, _ := e.CanAdmit("ns/ad-A", q, usage, newSpec2, &oldSpec)
 	if !ok2 {
 		t.Errorf("expected exact-limit update to be admitted")
 	}
 
 	// Delta that exceeds ceiling → rejected.
 	newSpec3 := makeSpec(7, "") // delta replicas = +3; 8+3=11 > 10 → rejected
-	ok3, reason3 := e.canAdmit("ns/ad-A", q, usage, newSpec3, &oldSpec)
+	ok3, reason3 := e.CanAdmit("ns/ad-A", q, usage, newSpec3, &oldSpec)
 	if ok3 {
 		t.Errorf("expected over-limit update to be rejected; got reason %q", reason3)
 	}
@@ -231,21 +231,21 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 
 	// UPDATE that keeps replicas.max unchanged → must be admitted (no increase).
 	sameSpec := makeSpec(5, "")
-	ok, reason := e.canAdmit("ns/ad-existing", q, usage, sameSpec, &oldSpec)
+	ok, reason := e.CanAdmit("ns/ad-existing", q, usage, sameSpec, &oldSpec)
 	if !ok {
 		t.Errorf("update keeping replicas.max unchanged should be allowed after quota downgrade; got: %q", reason)
 	}
 
 	// UPDATE that reduces replicas.max → must also be admitted.
 	smallerSpec := makeSpec(4, "")
-	ok2, reason2 := e.canAdmit("ns/ad-existing", q, usage, smallerSpec, &oldSpec)
+	ok2, reason2 := e.CanAdmit("ns/ad-existing", q, usage, smallerSpec, &oldSpec)
 	if !ok2 {
 		t.Errorf("update reducing replicas.max should be allowed; got: %q", reason2)
 	}
 
 	// UPDATE that further increases replicas.max → must be rejected.
 	largerSpec := makeSpec(6, "")
-	ok3, reason3 := e.canAdmit("ns/ad-existing", q, usage, largerSpec, &oldSpec)
+	ok3, reason3 := e.CanAdmit("ns/ad-existing", q, usage, largerSpec, &oldSpec)
 	if ok3 {
 		t.Errorf("update increasing replicas.max beyond maxReplicasPerAgent should be rejected; got reason: %q", reason3)
 	}
@@ -264,7 +264,7 @@ func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 	usage := makeUsage(1, 0, 2)
 	oldSpecNoGPU := makeSpec(2, "")
 	newSpecWithGPU := makeSpec(2, "1") // requests 2 GPUs when quota is 0
-	ok, reason := e.canAdmit("ns/ad-A", qZero, usage, newSpecWithGPU, &oldSpecNoGPU)
+	ok, reason := e.CanAdmit("ns/ad-A", qZero, usage, newSpecWithGPU, &oldSpecNoGPU)
 	if ok {
 		t.Errorf("expected GPU request on zero-GPU quota to be rejected; got ok")
 	}
@@ -279,14 +279,14 @@ func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 
 	// Update that doesn't increase GPUs (e.g. image change or same GPUs) is admitted.
 	sameGPU := makeSpec(2, "2")
-	ok2, reason2 := e.canAdmit("ns/ad-A", qLow, usageOver, sameGPU, &oldSpec4GPU)
+	ok2, reason2 := e.CanAdmit("ns/ad-A", qLow, usageOver, sameGPU, &oldSpec4GPU)
 	if !ok2 {
 		t.Errorf("expected non-increasing GPU update to be admitted when over-quota; got reason: %q", reason2)
 	}
 
 	// Update that increases GPUs further is rejected.
 	moreGPU := makeSpec(3, "2") // 2 GPU × 3 = 6 GPUs (delta +2)
-	ok3, reason3 := e.canAdmit("ns/ad-A", qLow, usageOver, moreGPU, &oldSpec4GPU)
+	ok3, reason3 := e.CanAdmit("ns/ad-A", qLow, usageOver, moreGPU, &oldSpec4GPU)
 	if ok3 {
 		t.Errorf("expected increasing GPU update when over-quota to be rejected")
 	}
@@ -307,24 +307,24 @@ func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	spec := makeSpec(2, "")
 
 	// First admission check passes; then we reserve.
-	ok1, _ := e.canAdmit("ns/ad-A", q, usage, spec, nil)
+	ok1, _ := e.CanAdmit("ns/ad-A", q, usage, spec, nil)
 	if !ok1 {
-		t.Fatal("first canAdmit should have passed")
+		t.Fatal("first CanAdmit should have passed")
 	}
 	e.reserve("ns/ad-A", spec, nil, 5*time.Second)
 
 	// Second concurrent request for the same remaining slot should now be blocked
 	// because ad-A's reservation already claimed it.
-	ok2, reason2 := e.canAdmit("ns/ad-B", q, usage, spec, nil)
+	ok2, reason2 := e.CanAdmit("ns/ad-B", q, usage, spec, nil)
 	if ok2 {
-		t.Errorf("second canAdmit should have been blocked by in-flight reservation; reason=%q", reason2)
+		t.Errorf("second CanAdmit should have been blocked by in-flight reservation; reason=%q", reason2)
 	}
 
 	// After releasing ad-A's reservation, the second request passes again.
 	e.Release("ns/ad-A")
-	ok3, _ := e.canAdmit("ns/ad-B", q, usage, spec, nil)
+	ok3, _ := e.CanAdmit("ns/ad-B", q, usage, spec, nil)
 	if !ok3 {
-		t.Error("after Release, canAdmit should pass again")
+		t.Error("after Release, CanAdmit should pass again")
 	}
 }
 
@@ -342,7 +342,7 @@ func TestReservation_DoesNotDoubleCount(t *testing.T) {
 
 	// Calling canAdmit with the same admissionKey should exclude its own
 	// reservation from the in-flight sum (no double-count).
-	ok, _ := e.canAdmit("ns/ad-X", q, usage, spec, nil)
+	ok, _ := e.CanAdmit("ns/ad-X", q, usage, spec, nil)
 	// usage.agents=1, in-flight from ad-X is excluded, delta=1 → projected=2 ≤ 3 → ok
 	if !ok {
 		t.Error("canAdmit for the same AD key should not be blocked by its own reservation")
@@ -400,9 +400,9 @@ func TestRelease_Concurrent(t *testing.T) {
 			// After all releases, each key's slot should be free: a fresh
 			// canAdmit (zero usage, zero in-flight) must succeed for every key.
 			for _, k := range keys {
-				ok, reason := e.canAdmit(k, q, usage, spec, nil)
+				ok, reason := e.CanAdmit(k, q, usage, spec, nil)
 				if !ok {
-					t.Errorf("after Release, canAdmit(%q) = false; reason: %q", k, reason)
+					t.Errorf("after Release, CanAdmit(%q) = false; reason: %q", k, reason)
 				}
 			}
 
@@ -457,6 +457,36 @@ func TestAdmitAndReserve_AtomicRaceProtection(t *testing.T) {
 	if successCount != 1 {
 		t.Errorf("expected exactly 1 AdmitAndReserve to succeed; got successCount=%d failCount=%d",
 			successCount, failCount)
+	}
+}
+
+// TestAdmitAndReserve_DenialLeavesNoReservation is a white-box test that
+// verifies a denied admission does not pollute the in-flight map.
+func TestAdmitAndReserve_DenialLeavesNoReservation(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+	// Quota already exhausted: no remaining agents.
+	q := makeQuota(1, 10, 10, 10)
+	usage := makeUsage(1, 0, 0)
+	spec := makeSpec(1, "")
+
+	ok, reason := e.AdmitAndReserve("ns/ad-denied", q, usage, spec, nil, 5*time.Second)
+	if ok {
+		t.Errorf("AdmitAndReserve should have denied admission with exhausted quota, but it succeeded")
+	}
+	if reason == "" {
+		t.Errorf("AdmitAndReserve denial should include a reason, got empty string")
+	}
+
+	// White-box check: under the mutex, verify no reservation was created.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.reservations) != 0 {
+		t.Errorf("expected 0 reservations after denial; got %d entries: %v (denial reason: %s)",
+			len(e.reservations), e.reservations, reason)
+	}
+	if _, exists := e.reservations["ns/ad-denied"]; exists {
+		t.Errorf("denied key ns/ad-denied should not exist in reservations (denial reason: %s)", reason)
 	}
 }
 

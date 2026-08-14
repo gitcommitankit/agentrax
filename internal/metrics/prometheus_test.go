@@ -71,6 +71,11 @@ func TestParseScalarFromQueryResponse(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "multiple series in vector response",
+			body:    `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"http_requests_total"},"value":[1435781451.781,"100.5"]},{"metric":{"__name__":"http_requests_total"},"value":[1435781451.781,"200.5"]}]}}`,
+			wantErr: true,
+		},
+		{
 			name:    "unsupported resultType",
 			body:    `{"status":"success","data":{"resultType":"matrix","result":[]}}`,
 			wantErr: true,

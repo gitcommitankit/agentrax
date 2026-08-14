@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -139,8 +140,14 @@ func deleteChildResources(key types.NamespacedName) {
 	}
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	if err := k8sClient.Get(ctx, key, hpa); err == nil {
-		_ = k8sClient.Delete(ctx, hpa)
+	err := k8sClient.Get(ctx, key, hpa)
+	if err != nil && !apierrors.IsNotFound(err) {
+		panic(fmt.Sprintf("unexpected error reading HPA during cleanup: %v", err))
+	}
+	if err == nil {
+		if err := k8sClient.Delete(ctx, hpa); err != nil {
+			panic(fmt.Sprintf("failed to delete HPA during cleanup: %v", err))
+		}
 		Eventually(func() bool {
 			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{}))
 		}, testTimeout, testInterval).Should(BeTrue(), "child HPA should be deleted")

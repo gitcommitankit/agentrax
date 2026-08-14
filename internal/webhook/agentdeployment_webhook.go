@@ -238,9 +238,27 @@ func (v *AgentDeploymentCustomValidator) validateSpec(
 	// must not create a reservation that would transiently block valid admits.
 	admissionKey := fmt.Sprintf("%s/%s", ad.Namespace, ad.Name)
 	if len(allErrs) == 0 {
-		ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
-		if !ok {
-			allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+		// Detect server-side dry-run to avoid creating reservations for
+		// requests that will never be persisted.
+		isDryRun := false
+		if req, err := admission.RequestFromContext(ctx); err == nil && req.DryRun != nil && *req.DryRun {
+			isDryRun = true
+		}
+
+		if isDryRun {
+			// For dry-run requests, perform the quota check without writing
+			// to the reservations map. This still acquires the mutex to read
+			// consistent in-flight state, but does not create a reservation.
+			ok, reason := v.Enforcer.CanAdmit(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec)
+			if !ok {
+				allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+			}
+		} else {
+			// For persisted requests, use the atomic check-and-reserve.
+			ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
+			if !ok {
+				allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+			}
 		}
 	}
 

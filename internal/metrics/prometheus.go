@@ -184,8 +184,8 @@ func parseScalarFromQueryResponse(body []byte) (float64, error) {
 		}
 		return strconv.ParseFloat(valStr, 64)
 	case "vector":
-		if len(r.Data.Result) == 0 {
-			return 0, fmt.Errorf("Prometheus vector result is empty (metric may not exist yet)")
+		if len(r.Data.Result) != 1 {
+			return 0, fmt.Errorf("Prometheus vector result must contain exactly 1 element, got %d (metric may not exist yet or query returned multiple series)", len(r.Data.Result))
 		}
 		// Vector result: each element is {"metric":{},"value":[timestamp,"value"]}.
 		return extractValueFromVectorElement(r.Data.Result[0])
@@ -256,5 +256,5 @@ func formatTime(t time.Time) string {
 
 // formatDuration formats a time.Duration as a seconds string for the Prometheus API.
 func formatDuration(d time.Duration) string {
-	return strconv.FormatFloat(d.Seconds(), 'f', 0, 64) + "s"
+	return strconv.FormatFloat(d.Seconds(), 'f', 3, 64) + "s"
 }
