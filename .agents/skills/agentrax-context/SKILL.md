@@ -56,8 +56,11 @@ description: Project context and settled architecture decisions for the Agentrax
 | Canary    | Prometheus unreachable during pause             | Fail-safe rollback after 60 s; never hang                                        |
 | Canary    | Second rollout triggered mid-rollout            | Webhook rejects; never run two concurrent canaries on the same `AgentDeployment` |
 | Canary    | HPA during active canary                        | Pause stable HPA; no canary HPA; resume only after promote/rollback              |
+| Canary    | Out-of-band deletion of HTTPRoute/Deployment    | Self-healed on next reconcile cycle in `Step()` preserving active traffic split  |
+| Canary    | Rollout failed or aborted                       | Operator sets `RolloutFailed`, preserves `status.canaryVersion`, no retry loop   |
 | Quota     | Two concurrent near-limit creates               | In-flight reservation; one wins, one is rejected                                 |
 | Quota     | Quota lowered below current usage               | Set `OverQuota` condition; never forcibly delete existing resources              |
+| Quota     | `TenantQuota` deleted while agents exist        | Surface `TenantQuotaNotFound` on `QuotaLimited` condition; never crash           |
 | MCP       | Ungraceful pod termination                      | TTL/heartbeat expires the entry within one TTL window (default 90 s)             |
 | MCP       | Pod `Ready` but MCP handshake fails             | Do not register; surface `MCPHandshakeFailed` condition                          |
 | Deletion  | `AgentDeployment` deleted                       | Finalizer ensures MCP deregistration before `Service` is GC'd                    |

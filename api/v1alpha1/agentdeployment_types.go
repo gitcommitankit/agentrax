@@ -162,6 +162,21 @@ type AgentDeploymentStatus struct {
 	// CanaryWeight is the current percentage of traffic routed to the canary (0–100).
 	CanaryWeight int32 `json:"canaryWeight,omitempty"`
 
+	// CanaryStepIndex is the index of the currently executing rollout step.
+	// Persisted so the state machine survives operator restarts.
+	// +optional
+	CanaryStepIndex int `json:"canaryStepIndex,omitempty"`
+
+	// PauseStartedAt records when the current pause step began.
+	// Used to enforce maximum pause extensions and the fail-safe rollback timeout.
+	// +optional
+	PauseStartedAt *metav1.Time `json:"pauseStartedAt,omitempty"`
+
+	// PromUnreachableSince records when Prometheus last became unreachable.
+	// When non-nil and age exceeds FailSafeTimeout, a fail-safe rollback fires.
+	// +optional
+	PromUnreachableSince *metav1.Time `json:"promUnreachableSince,omitempty"`
+
 	// Registered is true when this agent is currently registered in the MCP registry.
 	Registered bool `json:"registered,omitempty"`
 

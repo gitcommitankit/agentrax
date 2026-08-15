@@ -9,7 +9,7 @@
 2. **Reconciler Pattern**:
    - Fetch the object first; if not found (`apierrors.IsNotFound`), return `ctrl.Result{}` immediately — it was deleted.
    - Always update `status` last, after all child resources are reconciled. Never update status mid-reconcile.
-   - Use `controllerutil.CreateOrUpdate` for all owned child resources (Deployment, Service, ServiceMonitor, HPA).
+   - Use `controllerutil.CreateOrUpdate` for all owned child resources (Deployment, Service, ServiceMonitor, HPA, HTTPRoute).
    - Requeue transient errors with `ctrl.Result{RequeueAfter: ...}`, not `ctrl.Result{Requeue: true}`.
 
 3. **Owner References & Finalizers**:

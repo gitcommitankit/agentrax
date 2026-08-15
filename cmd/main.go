@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -39,10 +40,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/controller"
+	"github.com/gitcommitankit/agentrax/internal/metrics"
 	"github.com/gitcommitankit/agentrax/internal/quota"
+	"github.com/gitcommitankit/agentrax/internal/rollout"
 	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -58,6 +62,7 @@ func init() {
 	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1.Install(scheme))
 
 	utilruntime.Must(agentraxv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
@@ -71,6 +76,9 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var gpuResourceName string
+	var prometheusURL string
+	var gatewayName string
+	var gatewayNamespace string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -84,6 +92,13 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&gpuResourceName, "gpu-resource-name", quota.DefaultGPUResourceName,
 		"Kubernetes resource name used to count GPU units in AgentDeployment resource limits.")
+	flag.StringVar(&prometheusURL, "prometheus-url", "",
+		"URL of the Prometheus HTTP API (e.g. http://prometheus-operated.monitoring.svc:9090). "+
+			"Required for Canary rollout strategy; if empty, canary is unavailable.")
+	flag.StringVar(&gatewayName, "gateway-name", "agentrax-gateway",
+		"Name of the Gateway API Gateway object used for canary traffic splitting.")
+	flag.StringVar(&gatewayNamespace, "gateway-namespace", "agentrax-system",
+		"Namespace of the Gateway API Gateway object used for canary traffic splitting.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -171,10 +186,29 @@ func main() {
 	// Shared quota enforcer used by both the webhook validator and TenantQuota reconciler.
 	quotaEnforcer := quota.NewEnforcer(gpuResourceName)
 
+	// Build the CanaryController when --prometheus-url is provided.
+	// When nil, AgentDeployments with strategy=Canary behave as Recreate.
+	var canaryController *rollout.Controller
+	if prometheusURL != "" {
+		setupLog.Info("canary rollout enabled", "prometheusURL", prometheusURL,
+			"gatewayName", gatewayName, "gatewayNamespace", gatewayNamespace)
+		canaryController = &rollout.Controller{
+			Client:           mgr.GetClient(),
+			Scheme:           mgr.GetScheme(),
+			PromClient:       metrics.NewClient(prometheusURL),
+			GatewayName:      gatewayName,
+			GatewayNamespace: gatewayNamespace,
+			FailSafeTimeout:  60 * time.Second,
+		}
+	} else {
+		setupLog.Info("canary rollout disabled (no --prometheus-url)")
+	}
+
 	if err = (&controller.AgentDeploymentReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		GPUResourceName: gpuResourceName,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		GPUResourceName:  gpuResourceName,
+		CanaryController: canaryController,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 		os.Exit(1)
