@@ -14,10 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package quota_test
+// White-box test: package quota (not quota_test) so unexported methods
+// like reserve are accessible for isolated unit testing.
+// AdmitAndReserve remains the production-facing atomic API.
+package quota
 
 import (
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,11 +31,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
-	"github.com/gitcommitankit/agentrax/internal/quota"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+// makeSpec creates an AgentDeploymentSpec test fixture with given maxReplicas and GPU limit.
 func makeSpec(maxReplicas int32, gpuLimit string) agentraxv1alpha1.AgentDeploymentSpec {
 	spec := agentraxv1alpha1.AgentDeploymentSpec{
 		Image:     "test-image:v1",
@@ -51,6 +57,7 @@ func makeSpec(maxReplicas int32, gpuLimit string) agentraxv1alpha1.AgentDeployme
 	return spec
 }
 
+// makeQuota creates a TenantQuotaSpec test fixture with given quota limits.
 func makeQuota(maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) agentraxv1alpha1.TenantQuotaSpec {
 	return agentraxv1alpha1.TenantQuotaSpec{
 		MaxAgents:           maxAgents,
@@ -60,6 +67,7 @@ func makeQuota(maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) 
 	}
 }
 
+// makeUsage creates a TenantQuotaStatus test fixture with given observed usage.
 func makeUsage(agents, gpus, replicas int32) agentraxv1alpha1.TenantQuotaStatus {
 	return agentraxv1alpha1.TenantQuotaStatus{
 		UsedAgents:        agents,
@@ -70,15 +78,16 @@ func makeUsage(agents, gpus, replicas int32) agentraxv1alpha1.TenantQuotaStatus 
 
 // newTestEnforcer creates an Enforcer for tests and registers Stop() as a cleanup
 // function so the background sweep goroutine is terminated when the test ends.
-func newTestEnforcer(t *testing.T) *quota.Enforcer {
+func newTestEnforcer(t *testing.T) *Enforcer {
 	t.Helper()
-	e := quota.NewEnforcer(quota.DefaultGPUResourceName)
+	e := NewEnforcer(DefaultGPUResourceName)
 	t.Cleanup(e.Stop)
 	return e
 }
 
 // ── CanAdmit tests ────────────────────────────────────────────────────────────
 
+// TestCanAdmit_Create verifies admission decisions for new AgentDeployment creates against various quota scenarios.
 func TestCanAdmit_Create(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -143,6 +152,21 @@ func TestCanAdmit_Create(t *testing.T) {
 			spec:      makeSpec(2, ""),    // no GPU requested → no increase
 			wantAdmit: true,
 		},
+		{
+			name:        "zero GPU quota rejects positive GPU request",
+			quota:       makeQuota(6, 0, 12, 6),
+			usage:       makeUsage(1, 0, 2),
+			spec:        makeSpec(2, "1"), // 1 GPU × 2 replicas = 2 > 0
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:      "zero GPU quota admits non-GPU request",
+			quota:     makeQuota(6, 0, 12, 6),
+			usage:     makeUsage(1, 0, 2),
+			spec:      makeSpec(2, ""), // 0 GPUs requested
+			wantAdmit: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -165,6 +189,7 @@ func TestCanAdmit_Create(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update verifies admission decisions when updating existing AgentDeployment specs.
 func TestCanAdmit_Update(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -192,6 +217,7 @@ func TestCanAdmit_Update(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade verifies that lowering maxReplicasPerAgent does not deadlock updates that do not increase replicas.
 func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 	// When maxReplicasPerAgent is lowered below an existing AD's replicas.max,
 	// updates that do NOT further increase replicas.max must still be allowed.
@@ -228,8 +254,193 @@ func TestCanAdmit_Update_MaxReplicasPerAgent_Downgrade(t *testing.T) {
 	}
 }
 
+// TestCanAdmit_Update_GPUCeiling verifies admission behavior when updating GPU requests or when GPU quota is reduced.
+func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		quota       agentraxv1alpha1.TenantQuotaSpec
+		usage       agentraxv1alpha1.TenantQuotaStatus
+		oldSpec     agentraxv1alpha1.AgentDeploymentSpec
+		newSpec     agentraxv1alpha1.AgentDeploymentSpec
+		wantAdmit   bool
+		wantContain string
+	}{
+		{
+			name:        "zero quota rejects increasing GPU allocation",
+			quota:       makeQuota(6, 0, 10, 6),
+			usage:       makeUsage(1, 0, 2),
+			oldSpec:     makeSpec(2, ""),
+			newSpec:     makeSpec(2, "1"), // requests 2 GPUs when quota is 0
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:        "non-increasing GPU update when over-quota is admitted",
+			quota:       makeQuota(6, 2, 10, 6), // quota lowered to 2 GPUs
+			usage:       makeUsage(1, 4, 2),     // current usage is 4 GPUs (already over)
+			oldSpec:     makeSpec(2, "2"),       // 2 GPU × 2 = 4 GPUs
+			newSpec:     makeSpec(2, "2"),       // same GPUs
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:        "increasing GPU update when over-quota is rejected",
+			quota:       makeQuota(6, 2, 10, 6), // quota lowered to 2 GPUs
+			usage:       makeUsage(1, 4, 2),     // current usage is 4 GPUs (already over)
+			oldSpec:     makeSpec(2, "2"),       // 2 GPU × 2 = 4 GPUs
+			newSpec:     makeSpec(3, "2"),       // 2 GPU × 3 = 6 GPUs (delta +2)
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnforcer(t)
+			got, reason := e.CanAdmit("ns/ad-A", tc.quota, tc.usage, tc.newSpec, &tc.oldSpec)
+			if got != tc.wantAdmit {
+				t.Errorf("CanAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
+			}
+			if !tc.wantAdmit && tc.wantContain != "" {
+				if !strings.Contains(reason, tc.wantContain) {
+					t.Errorf("expected reason to contain %q, got %q", tc.wantContain, reason)
+				}
+			}
+		})
+	}
+}
+
+// TestCanAdmit_Update_CrossTenantMove verifies that when an AgentDeployment
+// moves from one tenant to another (TenantRef changes), the full requested
+// resources are charged to the target tenant's quota, not a delta.
+func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
+	t.Parallel()
+	const (
+		oldTenant    = "old-tenant"
+		targetTenant = "target-tenant"
+	)
+
+	tests := []struct {
+		name        string
+		quota       agentraxv1alpha1.TenantQuotaSpec
+		usage       agentraxv1alpha1.TenantQuotaStatus
+		oldSpec     agentraxv1alpha1.AgentDeploymentSpec
+		newSpec     agentraxv1alpha1.AgentDeploymentSpec
+		wantAdmit   bool
+		wantContain string
+	}{
+		{
+			name:  "cross-tenant move into full quota is rejected",
+			quota: makeQuota(2, 4, 6, 4), // maxAgents=2, maxGPUs=4, maxTotalReplicas=6
+			usage: makeUsage(2, 4, 6),    // already at full capacity
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // 3 replicas, 1 GPU per replica = 3 GPUs total
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // same resources: 3 replicas, 3 GPUs
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxAgents",
+		},
+		{
+			name:  "cross-tenant move into quota with capacity is admitted",
+			quota: makeQuota(3, 8, 10, 4), // enough room: maxAgents=3, maxGPUs=8, maxTotalReplicas=10
+			usage: makeUsage(1, 2, 4),     // current: 1 agent, 2 GPUs, 4 replicas
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // 3 replicas, 3 GPUs
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(3, "1") // same resources
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:  "cross-tenant move with resource increase when quota allows",
+			quota: makeQuota(3, 5, 8, 5),
+			usage: makeUsage(1, 1, 2), // 1 agent, 1 GPU, 2 replicas
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(2, "1") // 2 replicas, 2 GPUs
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(4, "1") // 4 replicas, 4 GPUs
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   true,
+			wantContain: "",
+		},
+		{
+			name:  "cross-tenant move into insufficient GPU quota is rejected",
+			quota: makeQuota(3, 4, 8, 5), // maxGPUs=4 (too low for +4)
+			usage: makeUsage(1, 1, 2),
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(2, "1")
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(4, "1") // 4 GPUs needed
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxGPUs",
+		},
+		{
+			name:  "cross-tenant move of 8-replica workload into tenant with maxReplicasPerAgent=2 is rejected",
+			quota: makeQuota(5, 10, 20, 2), // maxReplicasPerAgent=2
+			usage: makeUsage(1, 0, 5),
+			oldSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(8, "") // 8 replicas
+				s.TenantRef = oldTenant
+				return s
+			}(),
+			newSpec: func() agentraxv1alpha1.AgentDeploymentSpec {
+				s := makeSpec(8, "") // 8 replicas
+				s.TenantRef = targetTenant
+				return s
+			}(),
+			wantAdmit:   false,
+			wantContain: "maxReplicasPerAgent",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnforcer(t)
+			got, reason := e.CanAdmit("ns/ad-move", tc.quota, tc.usage, tc.newSpec, &tc.oldSpec)
+			if got != tc.wantAdmit {
+				t.Errorf("CanAdmit() = %v, want %v; reason: %q", got, tc.wantAdmit, reason)
+			}
+			if !tc.wantAdmit && tc.wantContain != "" {
+				if !strings.Contains(reason, tc.wantContain) {
+					t.Errorf("expected reason to contain %q, got %q", tc.wantContain, reason)
+				}
+			}
+		})
+	}
+}
+
 // ── In-flight reservation tests ───────────────────────────────────────────────
 
+// TestReservation_BlocksConcurrentCreate verifies that an in-flight reservation blocks concurrent creation of the same remaining slot.
 func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -243,7 +454,7 @@ func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	if !ok1 {
 		t.Fatal("first CanAdmit should have passed")
 	}
-	e.Reserve("ns/ad-A", spec, nil, 5*time.Second)
+	e.reserve("ns/ad-A", spec, nil, 5*time.Second)
 
 	// Second concurrent request for the same remaining slot should now be blocked
 	// because ad-A's reservation already claimed it.
@@ -260,6 +471,7 @@ func TestReservation_BlocksConcurrentCreate(t *testing.T) {
 	}
 }
 
+// TestReservation_DoesNotDoubleCount verifies that re-admission for the same AD key excludes its own prior reservation.
 func TestReservation_DoesNotDoubleCount(t *testing.T) {
 	// A re-admission for the same AD key should exclude its own prior reservation
 	// so it isn't double-counted.
@@ -269,19 +481,161 @@ func TestReservation_DoesNotDoubleCount(t *testing.T) {
 	usage := makeUsage(1, 0, 2)
 	spec := makeSpec(2, "")
 
-	e.Reserve("ns/ad-X", spec, nil, 5*time.Second)
+	e.reserve("ns/ad-X", spec, nil, 5*time.Second)
 
-	// Calling CanAdmit with the same admissionKey should exclude its own
+	// Calling canAdmit with the same admissionKey should exclude its own
 	// reservation from the in-flight sum (no double-count).
 	ok, _ := e.CanAdmit("ns/ad-X", q, usage, spec, nil)
 	// usage.agents=1, in-flight from ad-X is excluded, delta=1 → projected=2 ≤ 3 → ok
 	if !ok {
-		t.Error("CanAdmit for the same AD key should not be blocked by its own reservation")
+		t.Error("canAdmit for the same AD key should not be blocked by its own reservation")
+	}
+}
+
+// TestRelease_Concurrent verifies that concurrent Release calls on distinct keys
+// are race-free and that all reservations are removed. Table-driven so we cover
+// different concurrency fan-outs.
+func TestRelease_Concurrent(t *testing.T) {
+	tests := []struct {
+		name    string
+		numKeys int
+	}{
+		{"2 concurrent releases", 2},
+		{"5 concurrent releases", 5},
+		{"10 concurrent releases", 10},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnforcer(t)
+			// Quota large enough to hold all initial reservations at once.
+			q := makeQuota(int32(tc.numKeys*2), 0, int32(tc.numKeys*10), int32(tc.numKeys+1))
+			usage := makeUsage(0, 0, 0)
+			spec := makeSpec(1, "")
+
+			// Create one reservation per key sequentially (no concurrency yet).
+			keys := make([]string, tc.numKeys)
+			for i := range keys {
+				keys[i] = fmt.Sprintf("ns/ad-%d", i)
+				ok, _ := e.AdmitAndReserve(keys[i], q, usage, spec, nil, 30*time.Second)
+				if !ok {
+					t.Fatalf("initial AdmitAndReserve(%q) failed unexpectedly", keys[i])
+				}
+			}
+
+			// Release all reservations concurrently from a start barrier so
+			// goroutines are likely to overlap rather than run sequentially.
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for _, k := range keys {
+				k := k
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start // wait until all goroutines are ready
+					e.Release(k)
+				}()
+			}
+			close(start) // release all goroutines simultaneously
+			wg.Wait()
+
+			// After all releases, each key's slot should be free: a fresh
+			// canAdmit (zero usage, zero in-flight) must succeed for every key.
+			for _, k := range keys {
+				ok, reason := e.CanAdmit(k, q, usage, spec, nil)
+				if !ok {
+					t.Errorf("after Release, CanAdmit(%q) = false; reason: %q", k, reason)
+				}
+			}
+
+			// Every reservation must be gone, not merely within headroom.
+			e.mu.Lock()
+			remaining := len(e.reservations)
+			e.mu.Unlock()
+			if remaining != 0 {
+				t.Errorf("after concurrent Release, %d reservations remain; want 0", remaining)
+			}
+		})
+	}
+}
+
+// TestAdmitAndReserve_AtomicRaceProtection verifies that concurrent calls to
+// AdmitAndReserve for the same final quota slot allow exactly one through.
+// This is the property that the separate CanAdmit+Reserve two-call pattern
+// could not guarantee (TOCTOU race).
+func TestAdmitAndReserve_AtomicRaceProtection(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+	// Exactly 1 agent slot remaining.
+	q := makeQuota(1, 0, 5, 5)
+	usage := makeUsage(0, 0, 0)
+	spec := makeSpec(1, "")
+
+	var (
+		successCount int64
+		failCount    int64
+		wg           sync.WaitGroup
+	)
+	// Start barrier: ensure both goroutines are scheduled before either calls
+	// AdmitAndReserve, maximising the chance of a real concurrent execution.
+	start := make(chan struct{})
+	for _, key := range []string{"ns/ad-A", "ns/ad-B"} {
+		key := key
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // wait until both goroutines are running
+			ok, _ := e.AdmitAndReserve(key, q, usage, spec, nil, 5*time.Second)
+			if ok {
+				atomic.AddInt64(&successCount, 1)
+			} else {
+				atomic.AddInt64(&failCount, 1)
+			}
+		}()
+	}
+	close(start) // release both goroutines simultaneously
+	wg.Wait()
+
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 AdmitAndReserve to succeed; got successCount=%d failCount=%d",
+			successCount, failCount)
+	}
+}
+
+// TestAdmitAndReserve_DenialLeavesNoReservation is a white-box test that
+// verifies a denied admission does not pollute the in-flight map.
+func TestAdmitAndReserve_DenialLeavesNoReservation(t *testing.T) {
+	t.Parallel()
+	e := newTestEnforcer(t)
+	// Quota already exhausted: no remaining agents.
+	q := makeQuota(1, 10, 10, 10)
+	usage := makeUsage(1, 0, 0)
+	spec := makeSpec(1, "")
+
+	ok, reason := e.AdmitAndReserve("ns/ad-denied", q, usage, spec, nil, 5*time.Second)
+	if ok {
+		t.Errorf("AdmitAndReserve should have denied admission with exhausted quota, but it succeeded")
+	}
+	if reason == "" {
+		t.Errorf("AdmitAndReserve denial should include a reason, got empty string")
+	}
+
+	// White-box check: under the mutex, verify no reservation was created.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.reservations) != 0 {
+		t.Errorf("expected 0 reservations after denial; got %d entries: %v (denial reason: %s)",
+			len(e.reservations), e.reservations, reason)
+	}
+	if _, exists := e.reservations["ns/ad-denied"]; exists {
+		t.Errorf("denied key ns/ad-denied should not exist in reservations (denial reason: %s)", reason)
 	}
 }
 
 // ── ComputeUsage tests ────────────────────────────────────────────────────────
 
+// TestComputeUsage verifies aggregation of agents, GPUs, and replicas across multiple AgentDeployment specs.
 func TestComputeUsage(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -302,6 +656,7 @@ func TestComputeUsage(t *testing.T) {
 	}
 }
 
+// TestComputeUsage_Empty verifies that empty input returns all-zero usage.
 func TestComputeUsage_Empty(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
@@ -313,27 +668,29 @@ func TestComputeUsage_Empty(t *testing.T) {
 
 // ── IsOverQuota tests ─────────────────────────────────────────────────────────
 
+// TestIsOverQuota verifies over-quota condition detection across agents, GPUs, and replicas dimensions.
 func TestIsOverQuota(t *testing.T) {
 	t.Parallel()
 	e := newTestEnforcer(t)
-	q := makeQuota(3, 4, 10, 3)
-
 	tests := []struct {
 		name    string
+		quota   agentraxv1alpha1.TenantQuotaSpec
 		usage   agentraxv1alpha1.TenantQuotaStatus
 		wantOQ  bool
 		wantMsg string
 	}{
-		{"within limits", makeUsage(2, 3, 8), false, ""},
-		{"agents over", makeUsage(4, 3, 8), true, "maxAgents"},
-		{"GPUs over", makeUsage(2, 5, 8), true, "maxGPUs"},
-		{"replicas over", makeUsage(2, 3, 11), true, "maxTotalReplicas"},
+		{"within limits", makeQuota(3, 4, 10, 3), makeUsage(2, 3, 8), false, ""},
+		{"agents over", makeQuota(3, 4, 10, 3), makeUsage(4, 3, 8), true, "maxAgents"},
+		{"GPUs over", makeQuota(3, 4, 10, 3), makeUsage(2, 5, 8), true, "maxGPUs"},
+		{"replicas over", makeQuota(3, 4, 10, 3), makeUsage(2, 3, 11), true, "maxTotalReplicas"},
+		{"zero GPU quota with used GPUs over", makeQuota(3, 0, 10, 3), makeUsage(2, 1, 8), true, "maxGPUs"},
+		{"zero GPU quota with 0 used GPUs ok", makeQuota(3, 0, 10, 3), makeUsage(2, 0, 8), false, ""},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			over, msg := e.IsOverQuota(q, tc.usage)
+			over, msg := e.IsOverQuota(tc.quota, tc.usage)
 			if over != tc.wantOQ {
 				t.Errorf("IsOverQuota() = %v, want %v; msg=%q", over, tc.wantOQ, msg)
 			}
@@ -348,6 +705,7 @@ func TestIsOverQuota(t *testing.T) {
 // ParseErrorRate lives in api/v1alpha1 to avoid an import cycle.
 // Its tests are in api/v1alpha1/webhook_test.go.
 
+// TestParseErrorRate_ViaV1alpha1 verifies ParseErrorRate is accessible and correct from outside api/v1alpha1.
 func TestParseErrorRate_ViaV1alpha1(t *testing.T) {
 	// Smoke-test that ParseErrorRate is accessible from outside api/v1alpha1.
 	t.Parallel()
@@ -362,6 +720,7 @@ func TestParseErrorRate_ViaV1alpha1(t *testing.T) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// absFloat returns the absolute value of a float64.
 func absFloat(f float64) float64 {
 	if f < 0 {
 		return -f

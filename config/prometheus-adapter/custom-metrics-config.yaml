@@ -1,0 +1,51 @@
+# Prometheus Adapter custom metrics configuration for Agentrax.
+#
+# This ConfigMap is consumed by the prometheus-adapter deployment (typically in
+# the monitoring namespace). It maps PromQL queries to named custom metrics that
+# the HorizontalPodAutoscaler can target via the custom.metrics.k8s.io API.
+#
+# Deploy with:
+#   kubectl apply -f config/prometheus-adapter/custom-metrics-config.yaml
+#   kubectl rollout restart deployment/prometheus-adapter -n monitoring
+#
+# Verify metrics are registered:
+#   kubectl get --raw /apis/external.metrics.k8s.io/v1beta1 | jq .
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Use a distinct name so this ConfigMap does not collide with or overwrite
+  # the upstream prometheus-adapter ConfigMap (commonly named adapter-config).
+  # Reference this name in your prometheus-adapter Deployment via
+  # --config=/etc/adapter/config.yaml mounted from this ConfigMap.
+  name: agentrax-custom-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus-adapter
+    app.kubernetes.io/managed-by: agentrax
+data:
+  config.yaml: |
+    externalRules:
+      # ── queueDepth ────────────────────────────────────────────────────────────
+      # Exposes agentrax_queue_depth via external.metrics.k8s.io, which is the
+      # API group queried by HPAs using ExternalMetricSourceType (the type
+      # BuildHPA produces). The <<.LabelMatchers>> template is populated by the
+      # Prometheus Adapter from the HPA metric selector. Prometheus sanitizes
+      # label names (app.kubernetes.io/name → app_kubernetes_io_name), so the
+      # query references the sanitized forms that actually exist in storage.
+      - seriesQuery: 'agentrax_queue_depth{namespace!=""}'
+        name:
+          matches: "^agentrax_queue_depth$"
+          as: "agentrax_queue_depth"
+        metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+      # ── gpuUtilization ────────────────────────────────────────────────────────
+      # Exposes agentrax_gpu_utilization via external.metrics.k8s.io.
+      # If your GPU device plugin exposes a different metric name (e.g., from DCGM),
+      # update the seriesQuery and the as: name here; the HPA target in the
+      # AgentDeployment spec references the as: name, which stays stable.
+      - seriesQuery: 'agentrax_gpu_utilization{namespace!=""}'
+        name:
+          matches: "^agentrax_gpu_utilization$"
+          as: "agentrax_gpu_utilization"
+        metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'

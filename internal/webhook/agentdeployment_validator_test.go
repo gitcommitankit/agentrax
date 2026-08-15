@@ -104,6 +104,7 @@ func validCanaryAD() *agentraxv1alpha1.AgentDeployment {
 
 // ── ValidateCreate tests ──────────────────────────────────────────────────────
 
+// TestValidateCreate_HappyPath verifies successful admission validation of a valid AgentDeployment.
 func TestValidateCreate_HappyPath(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -121,6 +122,7 @@ func TestValidateCreate_HappyPath(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_TenantRefNotFound verifies admission rejection when the referenced TenantQuota does not exist.
 func TestValidateCreate_TenantRefNotFound(t *testing.T) {
 	t.Parallel()
 	v := newValidatorNoTQ(t)
@@ -137,6 +139,7 @@ func TestValidateCreate_TenantRefNotFound(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_ReplicasMinGtMax verifies admission rejection when replicas.min exceeds replicas.max.
 func TestValidateCreate_ReplicasMinGtMax(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -153,6 +156,7 @@ func TestValidateCreate_ReplicasMinGtMax(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_OverMaxAgents verifies admission rejection when tenant maxAgents quota is reached.
 func TestValidateCreate_OverMaxAgents(t *testing.T) {
 	t.Parallel()
 	tqSpec := agentraxv1alpha1.TenantQuotaSpec{
@@ -174,6 +178,7 @@ func TestValidateCreate_OverMaxAgents(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_OverMaxReplicasPerAgent verifies admission rejection when replicas.max exceeds maxReplicasPerAgent.
 func TestValidateCreate_OverMaxReplicasPerAgent(t *testing.T) {
 	t.Parallel()
 	tqSpec := agentraxv1alpha1.TenantQuotaSpec{
@@ -194,6 +199,7 @@ func TestValidateCreate_OverMaxReplicasPerAgent(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_WrongType verifies that passing an unexpected runtime object type returns an error.
 func TestValidateCreate_WrongType(t *testing.T) {
 	t.Parallel()
 	v := newValidatorNoTQ(t)
@@ -205,6 +211,7 @@ func TestValidateCreate_WrongType(t *testing.T) {
 
 // ── validateCanarySpec tests ──────────────────────────────────────────────────
 
+// TestValidateCreate_Canary_HappyPath verifies admission validation of a well-formed canary rollout spec.
 func TestValidateCreate_Canary_HappyPath(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -214,6 +221,7 @@ func TestValidateCreate_Canary_HappyPath(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_NoSteps verifies rejection when canary rollout has no steps.
 func TestValidateCreate_Canary_NoSteps(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -225,6 +233,7 @@ func TestValidateCreate_Canary_NoSteps(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_StepBothFields verifies rejection when a canary step sets both setWeight and pause.
 func TestValidateCreate_Canary_StepBothFields(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -239,6 +248,7 @@ func TestValidateCreate_Canary_StepBothFields(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_NoFullWeight verifies rejection when no canary step promotes to 100% weight.
 func TestValidateCreate_Canary_NoFullWeight(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -252,6 +262,7 @@ func TestValidateCreate_Canary_NoFullWeight(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_MissingMaxErrorRate verifies rejection when canary rollback criteria omits maxErrorRate.
 func TestValidateCreate_Canary_MissingMaxErrorRate(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -263,6 +274,7 @@ func TestValidateCreate_Canary_MissingMaxErrorRate(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_InvalidMaxErrorRate verifies rejection when maxErrorRate is not a valid percentage string.
 func TestValidateCreate_Canary_InvalidMaxErrorRate(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -274,6 +286,7 @@ func TestValidateCreate_Canary_InvalidMaxErrorRate(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_MissingMaxP99 verifies rejection when canary rollback criteria omits maxP99LatencyMs.
 func TestValidateCreate_Canary_MissingMaxP99(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -285,6 +298,7 @@ func TestValidateCreate_Canary_MissingMaxP99(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_Canary_MissingMinRequestSample verifies rejection when minRequestSample is missing or zero.
 func TestValidateCreate_Canary_MissingMinRequestSample(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -298,6 +312,7 @@ func TestValidateCreate_Canary_MissingMinRequestSample(t *testing.T) {
 
 // ── validateMCPTools tests ────────────────────────────────────────────────────
 
+// TestValidateCreate_MCPTools_EmptyName verifies rejection of empty MCP tool names.
 func TestValidateCreate_MCPTools_EmptyName(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -315,6 +330,7 @@ func TestValidateCreate_MCPTools_EmptyName(t *testing.T) {
 	}
 }
 
+// TestValidateCreate_MCPTools_Duplicate verifies rejection of duplicate MCP tool names.
 func TestValidateCreate_MCPTools_Duplicate(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -334,6 +350,7 @@ func TestValidateCreate_MCPTools_Duplicate(t *testing.T) {
 
 // ── ValidateUpdate tests ──────────────────────────────────────────────────────
 
+// TestValidateUpdate_DeletionTimestampBypass verifies that objects being deleted bypass quota checks to avoid deadlocking finalizers.
 func TestValidateUpdate_DeletionTimestampBypass(t *testing.T) {
 	t.Parallel()
 	// Even with a TQ that would reject quota, updates with DeletionTimestamp
@@ -358,6 +375,7 @@ func TestValidateUpdate_DeletionTimestampBypass(t *testing.T) {
 	}
 }
 
+// TestValidateUpdate_RolloutInProgress_BlocksImageChange verifies that image changes are blocked during an active rollout.
 func TestValidateUpdate_RolloutInProgress_BlocksImageChange(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -377,6 +395,7 @@ func TestValidateUpdate_RolloutInProgress_BlocksImageChange(t *testing.T) {
 	}
 }
 
+// TestValidateUpdate_RolloutInProgress_AllowsNonImageChange verifies that non-image updates (e.g. labels) are permitted during rollout.
 func TestValidateUpdate_RolloutInProgress_AllowsNonImageChange(t *testing.T) {
 	t.Parallel()
 	v := newValidatorWithTQ(t, permissiveTQSpec(), agentraxv1alpha1.TenantQuotaStatus{})
@@ -397,6 +416,7 @@ func TestValidateUpdate_RolloutInProgress_AllowsNonImageChange(t *testing.T) {
 	}
 }
 
+// TestValidateUpdate_WrongType verifies that passing wrong object types to ValidateUpdate returns an error.
 func TestValidateUpdate_WrongType(t *testing.T) {
 	t.Parallel()
 	v := newValidatorNoTQ(t)
@@ -411,6 +431,7 @@ func TestValidateUpdate_WrongType(t *testing.T) {
 
 // ── ValidateDelete test ───────────────────────────────────────────────────────
 
+// TestValidateDelete_AlwaysNil verifies that ValidateDelete always allows deletion without error.
 func TestValidateDelete_AlwaysNil(t *testing.T) {
 	t.Parallel()
 	v := newValidatorNoTQ(t)

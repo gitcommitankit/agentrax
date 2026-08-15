@@ -50,3 +50,4 @@ webhooks:
         resources:
           - agentdeployments
     sideEffects: None
+    timeoutSeconds: 10

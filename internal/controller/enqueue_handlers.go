@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
@@ -45,5 +46,37 @@ func enqueueTenantQuota() handler.EventHandler {
 				},
 			},
 		}
+	})
+}
+
+// enqueueAgentDeploymentsForTenantQuota returns an EventHandler that maps every
+// TenantQuota event to reconcile requests for all AgentDeployments in the same
+// namespace that reference that TenantQuota. This ensures that lowering or
+// raising quota ceilings updates HPA maxReplicas and QuotaLimited conditions
+// across all affected agents without requiring out-of-band edits to each AD.
+func enqueueAgentDeploymentsForTenantQuota(c client.Client) handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		tq, ok := obj.(*agentraxv1alpha1.TenantQuota)
+		if !ok {
+			return nil
+		}
+		list := &agentraxv1alpha1.AgentDeploymentList{}
+		if err := c.List(ctx, list, client.InNamespace(tq.Namespace)); err != nil {
+			log.FromContext(ctx).Error(err, "failed to list AgentDeployments for TenantQuota watch",
+				"tenantQuota", tq.Name, "namespace", tq.Namespace)
+			return nil
+		}
+		var reqs []reconcile.Request
+		for _, ad := range list.Items {
+			if ad.Spec.TenantRef == tq.Name {
+				reqs = append(reqs, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Namespace: ad.Namespace,
+						Name:      ad.Name,
+					},
+				})
+			}
+		}
+		return reqs
 	})
 }

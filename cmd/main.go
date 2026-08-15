@@ -26,6 +26,8 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -35,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/controller"
@@ -48,13 +52,18 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// init registers all Kubernetes core, CRD, and monitoring schemes.
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 
 	utilruntime.Must(agentraxv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
+// main is the entrypoint for the Agentrax controller manager binary.
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
@@ -98,9 +107,18 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	webhookServer := webhook.NewServer(webhook.Options{
-		TLSOpts: tlsOpts,
-	})
+	// Resolve the webhook-enabled flag once so both the server creation and
+	// handler registration use the same value. Log it explicitly so operators
+	// can confirm the resolved state at startup.
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	setupLog.Info("webhook state resolved", "enabled", enableWebhooks)
+
+	var webhookServer webhook.Server
+	if enableWebhooks {
+		webhookServer = webhook.NewServer(webhook.Options{
+			TLSOpts: tlsOpts,
+		})
+	}
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
@@ -154,8 +172,9 @@ func main() {
 	quotaEnforcer := quota.NewEnforcer(gpuResourceName)
 
 	if err = (&controller.AgentDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		GPUResourceName: gpuResourceName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 		os.Exit(1)
@@ -168,9 +187,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "TenantQuota")
 		os.Exit(1)
 	}
-	if err = agentraxwebhook.SetupAgentDeploymentWebhookWithManager(mgr, quotaEnforcer); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "AgentDeployment")
-		os.Exit(1)
+	if enableWebhooks {
+		if err = agentraxwebhook.SetupAgentDeploymentWebhookWithManager(mgr, quotaEnforcer); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "AgentDeployment")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

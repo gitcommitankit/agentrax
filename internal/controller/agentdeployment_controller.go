@@ -24,11 +24,13 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,12 +41,39 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/scaling"
+)
+
+// quotaState is the outcome of reconcileHPA's quota evaluation, used by
+// updateStatus to apply the correct QuotaLimited condition without relying on
+// a bool that cannot distinguish between "not capped" and "not evaluated".
+type quotaState int
+
+const (
+	// quotaStateUncapped means HPA was reconciled and quota headroom was sufficient.
+	// updateStatus will clear the QuotaLimited condition.
+	quotaStateUncapped quotaState = iota
+	// quotaStateCapped means HPA was reconciled but maxReplicas was capped by quota.
+	// updateStatus will set QuotaLimited=True with reason HPAMaxReplicasCapped.
+	quotaStateCapped
+	// quotaStateUnknown means quota could not be evaluated (e.g., TenantQuota not found).
+	// updateStatus will set QuotaLimited=True with reason TenantQuotaNotFound.
+	quotaStateUnknown
+	// quotaStateSkipped means HPA reconciliation was skipped (canary rollout in progress).
+	// updateStatus must NOT touch the QuotaLimited condition so a pre-canary
+	// capped state is neither erroneously cleared nor re-set.
+	quotaStateSkipped
 )
 
 // AgentDeploymentReconciler reconciles an AgentDeployment object.
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// GPUResourceName is the Kubernetes resource name used to count GPU units
+	// (e.g. "nvidia.com/gpu"). Injected from the --gpu-resource-name operator flag.
+	// Used when computing quota headroom for HPA max-replicas capping.
+	GPUResourceName string
 
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
@@ -73,11 +102,13 @@ func (r *AgentDeploymentReconciler) SetDeregister(fn func(ctx context.Context, a
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agentrax.io,resources=tenantquotas,verbs=get;list;watch
 
 // Reconcile drives the AgentDeployment's observed state toward its declared spec.
 // It creates and self-heals a Deployment, Service, and (when Prometheus Operator is present)
@@ -136,9 +167,29 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
 	}
 
-	// 6. Derive status from the live Deployment and update it — always last.
-	if result, err := r.updateStatus(ctx, ad, logger); err != nil || result.RequeueAfter > 0 {
-		return result, err
+	// 6. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
+	// reconcileHPA also returns the quota evaluation state so updateStatus can
+	// write the correct QuotaLimited condition onto the freshly re-fetched object.
+	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
+	}
+
+	// 7. Derive status from the live Deployment and update it — always last.
+	// We continue into updateStatus even when hpaResult requests a requeue so
+	// that the QuotaLimited condition is written in the same reconcile cycle.
+	// Return the shorter of the two requeue intervals.
+	statusResult, err := r.updateStatus(ctx, ad, logger, qs)
+	if err != nil {
+		return statusResult, fmt.Errorf("updating status: %w", err)
+	}
+	if hpaResult.RequeueAfter > 0 {
+		if statusResult.RequeueAfter == 0 || hpaResult.RequeueAfter < statusResult.RequeueAfter {
+			return hpaResult, nil
+		}
+	}
+	if statusResult.RequeueAfter > 0 {
+		return statusResult, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -256,9 +307,112 @@ func (r *AgentDeploymentReconciler) reconcileServiceMonitor(ctx context.Context,
 	return err
 }
 
+// reconcileHPA creates or updates the HorizontalPodAutoscaler owned by this
+// AgentDeployment. It is skipped when a canary rollout is in progress because
+// Phase 4 owns the HPA lifecycle during rollout. The HPA's maxReplicas is
+// capped at the tenant quota headroom; the returned quotaState tells the caller
+// which QuotaLimited condition (if any) to apply to status.
+func (r *AgentDeploymentReconciler) reconcileHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (ctrl.Result, quotaState, error) {
+	// Phase 4 owns the HPA when a canary rollout is in progress. Signal
+	// quotaStateSkipped so updateStatus does not touch the QuotaLimited condition.
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress {
+		return ctrl.Result{}, quotaStateSkipped, nil
+	}
+
+	// Fetch the TenantQuota to compute quota headroom.
+	tq := &agentraxv1alpha1.TenantQuota{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ad.Spec.TenantRef, Namespace: ad.Namespace}, tq); err != nil {
+		if apierrors.IsNotFound(err) {
+			// TenantQuota missing — the webhook prevents this on create, but it
+			// can happen if the TenantQuota is deleted while agents exist.
+			// Signal quotaStateUnknown so updateStatus sets QuotaLimited with a
+			// TenantQuotaNotFound reason (not the "HPA capped" reason).
+			// Do NOT return an error so updateStatus still runs this cycle.
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, quotaStateUnknown, nil
+		}
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("fetching TenantQuota %q: %w", ad.Spec.TenantRef, err)
+	}
+
+	// Compute how many replicas the other agents in this tenant already consume
+	// so QuotaHeadroom accounts for the full tenant budget.
+	usedByOthers, err := r.replicasUsedByOtherAgents(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("computing replica usage for quota headroom: %w", err)
+	}
+
+	headroom := scaling.QuotaHeadroom(tq.Spec, ad.Spec, usedByOthers)
+	desiredHPA := scaling.BuildHPA(ad, headroom)
+
+	// Set controller owner reference before CreateOrUpdate so garbage collection
+	// removes the HPA when the AgentDeployment is deleted.
+	if err := controllerutil.SetControllerReference(ad, desiredHPA, r.Scheme); err != nil {
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("setting HPA owner reference: %w", err)
+	}
+
+	existing := &autoscalingv2.HorizontalPodAutoscaler{}
+	existing.Name = desiredHPA.Name
+	existing.Namespace = desiredHPA.Namespace
+
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desiredHPA.Labels
+		existing.Spec.ScaleTargetRef = desiredHPA.Spec.ScaleTargetRef
+		existing.Spec.MinReplicas = desiredHPA.Spec.MinReplicas
+		existing.Spec.MaxReplicas = desiredHPA.Spec.MaxReplicas
+		existing.Spec.Metrics = desiredHPA.Spec.Metrics
+		existing.Spec.Behavior = desiredHPA.Spec.Behavior
+		// Re-apply owner reference in case it was cleared out-of-band.
+		if err := controllerutil.SetControllerReference(ad, existing, r.Scheme); err != nil {
+			return fmt.Errorf("setting HPA owner reference: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return ctrl.Result{}, quotaStateUncapped, fmt.Errorf("creating/updating HPA: %w", err)
+	}
+
+	if scaling.IsQuotaCapped(ad, headroom) {
+		return ctrl.Result{}, quotaStateCapped, nil
+	}
+	return ctrl.Result{}, quotaStateUncapped, nil
+}
+
+// replicasUsedByOtherAgents returns the sum of spec.replicas.max across all
+// AgentDeployments in the same namespace that reference the same TenantQuota,
+// excluding the AgentDeployment being reconciled and any that are terminating
+// (DeletionTimestamp set). Terminating ADs will be removed shortly, so
+// including their replicas would inflate the quota headroom calculation and
+// cause premature rejection of new creates.
+func (r *AgentDeploymentReconciler) replicasUsedByOtherAgents(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) (int32, error) {
+	list := &agentraxv1alpha1.AgentDeploymentList{}
+	if err := r.List(ctx, list, client.InNamespace(ad.Namespace)); err != nil {
+		return 0, fmt.Errorf("listing AgentDeployments for quota headroom: %w", err)
+	}
+
+	var total int32
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Spec.TenantRef != ad.Spec.TenantRef {
+			continue
+		}
+		if other.Name == ad.Name && other.Namespace == ad.Namespace {
+			continue // exclude self
+		}
+		// Exclude terminating ADs: they will be deleted soon and their replicas
+		// should not count against the remaining budget.
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		total += other.Spec.Replicas.Max
+	}
+	return total, nil
+}
+
 // updateStatus derives the AgentDeployment status from the live Deployment and writes it.
+// qs is the quota evaluation outcome from reconcileHPA; the QuotaLimited condition
+// is applied to the freshly re-fetched object here so it is never silently discarded.
+// quotaStateSkipped means the condition must not be modified (canary in progress).
 // This is always the last step in the reconcile loop.
-func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment, logger logr.Logger) (ctrl.Result, error) {
+func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment, logger logr.Logger, qs quotaState) (ctrl.Result, error) {
 	// Re-fetch the live Deployment to get accurate replica counts.
 	dep := &appsv1.Deployment{}
 	depKey := client.ObjectKey{Name: ad.Name, Namespace: ad.Namespace}
@@ -287,8 +441,29 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 	// condition count) that a scalar/len check would silently miss.
 	prevStatus := latest.Status.DeepCopy()
 
-	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas
+	// Apply the QuotaLimited condition from reconcileHPA onto the freshly
+	// re-fetched object. This must happen before the DeepEqual check so the
+	// condition is written in the same API call as the rest of the status.
+	// quotaStateSkipped means HPA reconciliation was bypassed (canary in progress)
+	// — the existing condition must be left untouched.
+	switch qs {
+	case quotaStateCapped:
+		SetCondition(latest, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
+			"HPAMaxReplicasCapped",
+			fmt.Sprintf("spec.replicas.max (%d) exceeds quota headroom; HPA capped",
+				latest.Spec.Replicas.Max))
+	case quotaStateUnknown:
+		SetCondition(latest, agentraxv1alpha1.ConditionQuotaLimited, metav1.ConditionTrue,
+			"TenantQuotaNotFound",
+			fmt.Sprintf("TenantQuota %q not found in namespace %s; requeuing",
+				latest.Spec.TenantRef, latest.Namespace))
+	case quotaStateUncapped:
+		RemoveCondition(latest, agentraxv1alpha1.ConditionQuotaLimited)
+	default:
+		// quotaStateSkipped (canary in progress): leave the existing condition as-is.
+	}
 
+	latest.Status.CurrentReplicas = dep.Status.ReadyReplicas
 	// Detect ImagePullBackOff by inspecting pod list; requeue if listing fails.
 	imagePullFailed, failMsg, err := r.detectImagePullFailure(ctx, ad)
 	if err != nil {
@@ -463,6 +638,11 @@ func (r *AgentDeploymentReconciler) desiredService(ad *agentraxv1alpha1.AgentDep
 }
 
 // desiredServiceMonitor builds the ServiceMonitor spec that scrapes /metrics on the agent pods.
+// TargetLabels propagates app.kubernetes.io/name and app.kubernetes.io/managed-by from the
+// Service object into every Prometheus sample. Prometheus sanitizes these label names
+// (dots become underscores: app_kubernetes_io_name, app_kubernetes_io_managed_by) before
+// storage, and the HPA metric selector and Prometheus Adapter query reference the sanitized
+// forms to match the stored labels.
 func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.AgentDeployment) *monitoringv1.ServiceMonitor {
 	labels := agentLabels(ad)
 
@@ -475,6 +655,13 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{
 				MatchLabels: labels,
+			},
+			// Carry the two labels used by the HPA ExternalMetric selector into
+			// every scraped sample. Prometheus will sanitize the dots to underscores
+			// during ingestion (app.kubernetes.io/name → app_kubernetes_io_name).
+			TargetLabels: []string{
+				"app.kubernetes.io/name",
+				"app.kubernetes.io/managed-by",
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
@@ -502,7 +689,12 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{})
+		Owns(&corev1.Service{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Watches(
+			&agentraxv1alpha1.TenantQuota{},
+			enqueueAgentDeploymentsForTenantQuota(mgr.GetClient()),
+		)
 
 	if r.hasServiceMonitorCRD {
 		bldr = bldr.Owns(&monitoringv1.ServiceMonitor{})

@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -66,6 +67,7 @@ var testReconciler *AgentDeploymentReconciler
 // and the validating webhook in integration tests.
 var testEnforcer *quota.Enforcer
 
+// TestControllers is the Ginkgo test suite runner for controller integration tests.
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Controller Suite")
@@ -110,6 +112,8 @@ var _ = BeforeSuite(func() {
 	Expect(agentraxv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(appsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(corev1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// Register autoscaling/v2 so HPA objects can be created/read in integration tests.
+	Expect(autoscalingv2.AddToScheme(scheme.Scheme)).To(Succeed())
 	// Register prometheus-operator types so the reconciler can handle ServiceMonitor objects.
 	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
 	// Register apiextensions types so serviceMonitorCRDExists can decode CRD objects
@@ -140,8 +144,9 @@ var _ = BeforeSuite(func() {
 	testEnforcer = quota.NewEnforcer(quota.DefaultGPUResourceName)
 
 	testReconciler = &AgentDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		GPUResourceName: quota.DefaultGPUResourceName,
 	}
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 

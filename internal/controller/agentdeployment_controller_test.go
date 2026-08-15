@@ -24,8 +24,10 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -134,6 +136,18 @@ func deleteChildResources(key types.NamespacedName) {
 		Eventually(func() bool {
 			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &monitoringv1.ServiceMonitor{}))
 		}, testTimeout, testInterval).Should(BeTrue(), "child ServiceMonitor should be deleted")
+	}
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+	err := k8sClient.Get(ctx, key, hpa)
+	if err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "unexpected error reading HPA during cleanup")
+	}
+	if err == nil {
+		Expect(k8sClient.Delete(ctx, hpa)).To(Succeed(), "HPA cleanup delete should succeed")
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{}))
+		}, testTimeout, testInterval).Should(BeTrue(), "child HPA should be deleted")
 	}
 }
 
@@ -336,6 +350,14 @@ var _ = Describe("AgentDeployment Controller", func() {
 			Expect(sm.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
 			Expect(sm.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*sm.OwnerReferences[0].Controller).To(BeTrue(), "ServiceMonitor owner reference must have Controller=true")
+
+			// TargetLabels must include both labels used by the HPA ExternalMetric selector
+			// so that Prometheus carries them into scraped samples and the Adapter
+			// query's <<.LabelMatchers>> can filter by agent name.
+			Expect(sm.Spec.TargetLabels).To(ContainElements(
+				"app.kubernetes.io/name",
+				"app.kubernetes.io/managed-by",
+			), "TargetLabels must propagate HPA selector labels into Prometheus samples")
 		})
 
 		It("sets status.phase to Pending initially (no running pods in envtest)", func() {
@@ -701,6 +723,387 @@ var _ = Describe("AgentDeployment Controller", func() {
 			c := dep.Spec.Template.Spec.Containers[0]
 			Expect(c.Env).To(ContainElement(corev1.EnvVar{Name: "MODEL", Value: "gpt4"}))
 			Expect(c.Args).To(Equal([]string{"--serve", "--workers=4"}))
+		})
+	})
+})
+
+// ── Phase 3: HPA lifecycle integration tests ──────────────────────────────────
+
+var _ = Describe("AgentDeployment HPA lifecycle", func() {
+	Describe("HPA creation and spec", func() {
+		var key types.NamespacedName
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-hpa"}}
+			err := k8sClient.Create(ctx, ns)
+			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+			key = createAgentDeployment("ad-hpa", "test-hpa", testNginxImage, 8080, 1)
+		})
+
+		AfterEach(func() {
+			deleteAgentDeployment(key)
+			deleteChildResources(key)
+		})
+
+		It("creates a managed HPA after AgentDeployment is reconciled", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed(), "HPA should be created")
+
+			Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
+			Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal(key.Name))
+			Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
+			Expect(*hpa.Spec.MinReplicas).To(Equal(int32(1)))
+			Expect(hpa.Spec.MaxReplicas).To(Equal(int32(3)))
+		})
+
+		It("sets the HPA owner reference to the AgentDeployment", func() {
+			parent := &agentraxv1alpha1.AgentDeployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, parent)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.OwnerReferences).To(HaveLen(1))
+			Expect(hpa.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(hpa.OwnerReferences[0].Name).To(Equal(key.Name))
+			Expect(hpa.OwnerReferences[0].UID).To(Equal(parent.UID))
+			Expect(hpa.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*hpa.OwnerReferences[0].Controller).To(BeTrue())
+		})
+
+		It("configures an External metric source", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.Metrics).To(HaveLen(1))
+			Expect(hpa.Spec.Metrics[0].Type).To(Equal(autoscalingv2.ExternalMetricSourceType))
+			Expect(hpa.Spec.Metrics[0].External).NotTo(BeNil())
+			// createAgentDeployment uses metric: queueDepth
+			Expect(hpa.Spec.Metrics[0].External.Metric.Name).To(Equal("agentrax_queue_depth"))
+		})
+
+		It("sets stabilization windows on the HPA behavior", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.Behavior).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleUp).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).NotTo(BeNil())
+			Expect(*hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).To(Equal(int32(60)))
+			Expect(hpa.Spec.Behavior.ScaleDown).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).NotTo(BeNil())
+			Expect(*hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).To(Equal(int32(300)))
+		})
+	})
+
+	Describe("HPA self-healing", func() {
+		var key types.NamespacedName
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-hpa-selfheal"}}
+			err := k8sClient.Create(ctx, ns)
+			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+			key = createAgentDeployment("ad-hpa-sh", "test-hpa-selfheal", testNginxImage, 8080, 1)
+		})
+
+		AfterEach(func() {
+			deleteAgentDeployment(key)
+			deleteChildResources(key)
+		})
+
+		It("recreates the HPA when it is deleted out-of-band", func() {
+			// Wait for the initial HPA to be created.
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed(), "HPA should appear initially")
+			origUID := hpa.UID
+
+			// Delete the HPA out-of-band.
+			Expect(k8sClient.Delete(ctx, hpa)).To(Succeed())
+
+			// The reconciler should restore it within one reconcile interval with a new UID.
+			recreated := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, key, recreated)).To(Succeed())
+				g.Expect(recreated.UID).NotTo(Equal(origUID))
+			}, testTimeout, testInterval).Should(Succeed(), "HPA should be self-healed with a new UID")
+
+			ad := &agentraxv1alpha1.AgentDeployment{}
+			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+
+			Expect(recreated.OwnerReferences).To(HaveLen(1))
+			Expect(recreated.OwnerReferences[0].Kind).To(Equal("AgentDeployment"))
+			Expect(recreated.OwnerReferences[0].Name).To(Equal(key.Name))
+			Expect(recreated.OwnerReferences[0].UID).To(Equal(ad.UID))
+			Expect(recreated.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*recreated.OwnerReferences[0].Controller).To(BeTrue())
+		})
+	})
+
+	Describe("HPA created with correct spec after AgentDeployment creation", func() {
+		// Phase 3 DoD: "managed HPA exists after AgentDeployment creation; changes to
+		// replicas spec update HPA". This block verifies the initial HPA spec correctness —
+		// metric source, scaleTargetRef, min/max replicas, and stabilization windows.
+		var key types.NamespacedName
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-hpa-spec"}}
+			err := k8sClient.Create(ctx, ns)
+			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+			// Create with min=2, max=4, metric=queueDepth, target=75.
+			ensureTenantQuota("test-hpa-spec")
+			ad := &agentraxv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "ad-hpa-spec", Namespace: "test-hpa-spec"},
+				Spec: agentraxv1alpha1.AgentDeploymentSpec{
+					Image:     testNginxImage,
+					Port:      8080,
+					TenantRef: "team-test",
+					Replicas: agentraxv1alpha1.ScalingPolicy{
+						Min: 2, Max: 4, Metric: "queueDepth", Target: 75,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+			key = types.NamespacedName{Name: "ad-hpa-spec", Namespace: "test-hpa-spec"}
+		})
+
+		AfterEach(func() {
+			deleteAgentDeployment(key)
+			deleteChildResources(key)
+		})
+
+		It("creates an HPA with correct scaleTargetRef pointing to the Deployment", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.ScaleTargetRef.APIVersion).To(Equal("apps/v1"))
+			Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
+			Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal(key.Name))
+		})
+
+		It("creates an HPA with min and max replicas matching spec", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
+			Expect(*hpa.Spec.MinReplicas).To(Equal(int32(2)), "minReplicas should match spec.replicas.min")
+			Expect(hpa.Spec.MaxReplicas).To(Equal(int32(4)), "maxReplicas should match spec.replicas.max")
+		})
+
+		It("creates an HPA wired to the agentrax_queue_depth external metric", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.Metrics).To(HaveLen(1))
+			m := hpa.Spec.Metrics[0]
+			Expect(m.Type).To(Equal(autoscalingv2.ExternalMetricSourceType))
+			Expect(m.External).NotTo(BeNil())
+			Expect(m.External.Metric.Name).To(Equal("agentrax_queue_depth"))
+			Expect(m.External.Target.Type).To(Equal(autoscalingv2.AverageValueMetricType))
+		})
+
+		It("creates an HPA with the correct stabilization windows (60s up, 300s down)", func() {
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, hpa)
+			}, testTimeout, testInterval).Should(Succeed())
+
+			Expect(hpa.Spec.Behavior).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleUp).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).NotTo(BeNil())
+			Expect(*hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds).To(Equal(int32(60)),
+				"scale-up stabilization should be 60s")
+			Expect(hpa.Spec.Behavior.ScaleDown).NotTo(BeNil())
+			Expect(hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).NotTo(BeNil())
+			Expect(*hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds).To(Equal(int32(300)),
+				"scale-down stabilization should be 300s")
+		})
+	})
+
+	Describe("HPA spec update on replicas change", func() {
+		var key types.NamespacedName
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-hpa-update"}}
+			err := k8sClient.Create(ctx, ns)
+			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+			key = createAgentDeployment("ad-hpa-upd", "test-hpa-update", testNginxImage, 8080, 1)
+		})
+
+		AfterEach(func() {
+			deleteAgentDeployment(key)
+			deleteChildResources(key)
+		})
+
+		It("updates HPA maxReplicas when spec.replicas.max changes", func() {
+			// Wait for initial HPA.
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{})
+			}, testTimeout, testInterval).Should(Succeed())
+
+			// Patch spec.replicas.max to 5.
+			ad := &agentraxv1alpha1.AgentDeployment{}
+			Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+			patch := client.MergeFrom(ad.DeepCopy())
+			ad.Spec.Replicas.Max = 5
+			Expect(k8sClient.Patch(ctx, ad, patch)).To(Succeed())
+
+			// Expect the HPA to be updated to maxReplicas=5
+			// (quota headroom in tests is maxReplicasPerAgent=10, so no capping).
+			Eventually(func(g Gomega) {
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			}, testTimeout, testInterval).Should(Succeed())
+
+			// Verify QuotaLimited condition is NOT True — max=5 is within headroom of 10.
+			// Use Consistently so a transient True that later settles does not go undetected.
+			Consistently(func(g Gomega) {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				g.Expect(c != nil && c.Status == metav1.ConditionTrue).To(BeFalse(),
+					"QuotaLimited should never be True when max (5) <= headroom (10)")
+			}, 3*time.Second, testInterval).Should(Succeed())
+		})
+	})
+
+	Describe("QuotaLimited condition when HPA is capped", func() {
+		var key types.NamespacedName
+		const nsName = "test-hpa-quota"
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+			err := k8sClient.Create(ctx, ns)
+			Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
+
+			// Start with a generous quota (maxReplicasPerAgent=5) so the initial
+			// create passes webhook validation.
+			tq := &agentraxv1alpha1.TenantQuota{
+				ObjectMeta: metav1.ObjectMeta{Name: "team-quota-test", Namespace: nsName},
+				Spec: agentraxv1alpha1.TenantQuotaSpec{
+					MaxAgents:           10,
+					MaxGPUs:             0,
+					MaxTotalReplicas:    5,
+					MaxReplicasPerAgent: 5,
+				},
+			}
+			err = k8sClient.Create(ctx, tq)
+			if apierrors.IsAlreadyExists(err) {
+				existing := &agentraxv1alpha1.TenantQuota{}
+				Expect(k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), existing)).To(Succeed())
+				existing.Spec = tq.Spec
+				Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Create an AgentDeployment with max=5, which fits the initial quota.
+			ad := &agentraxv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "ad-quota-capped", Namespace: nsName},
+				Spec: agentraxv1alpha1.AgentDeploymentSpec{
+					Image:     testNginxImage,
+					Port:      8080,
+					TenantRef: "team-quota-test",
+					Replicas: agentraxv1alpha1.ScalingPolicy{
+						Min:    1,
+						Max:    5,
+						Metric: "queueDepth",
+						Target: 50,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+			key = types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}
+		})
+
+		AfterEach(func() {
+			deleteAgentDeployment(key)
+			deleteChildResources(key)
+			// Delete the TenantQuota so each It block starts from a clean slate.
+			// Without this, the first It (which lowers the ceiling) bleeds state
+			// into the next BeforeEach, causing webhook rejection on the AD create.
+			tqKey := namespacedName("team-quota-test", nsName)
+			tq := &agentraxv1alpha1.TenantQuota{}
+			if err := k8sClient.Get(ctx, tqKey, tq); err != nil {
+				if !apierrors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+			} else {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, tq))).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, tqKey, &agentraxv1alpha1.TenantQuota{}))
+				}, testTimeout, testInterval).Should(BeTrue(), "TenantQuota should be deleted")
+			}
+		})
+
+		It("caps HPA maxReplicas and sets QuotaLimited condition when quota is lowered", func() {
+			// Wait for initial HPA with maxReplicas=5 (uncapped).
+			Eventually(func(g Gomega) {
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			}, testTimeout, testInterval).Should(Succeed())
+
+			// Lower the TenantQuota ceiling to maxReplicasPerAgent=2, maxTotalReplicas=2.
+			// This causes the reconciler to cap HPA.maxReplicas at 2 and set QuotaLimited.
+			tq := &agentraxv1alpha1.TenantQuota{}
+			Expect(k8sClient.Get(ctx, namespacedName("team-quota-test", nsName), tq)).To(Succeed())
+			patch := tq.DeepCopy()
+			patch.Spec.MaxReplicasPerAgent = 2
+			patch.Spec.MaxTotalReplicas = 2
+			Expect(k8sClient.Patch(ctx, patch, client.MergeFrom(tq))).To(Succeed())
+
+			// HPA maxReplicas must be reduced to the new quota ceiling (2).
+			Eventually(func(g Gomega) {
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+				g.Expect(k8sClient.Get(ctx, key, hpa)).To(Succeed())
+				g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(2)))
+			}, testTimeout, testInterval).Should(Succeed(),
+				"HPA maxReplicas should be capped at the new quota ceiling")
+
+			// QuotaLimited condition must be True because spec.max (5) > headroom (2).
+			Eventually(func(g Gomega) {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				g.Expect(c).NotTo(BeNil())
+				g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			}, testTimeout, testInterval).Should(Succeed(),
+				"QuotaLimited condition should be True when HPA is capped by quota")
+		})
+
+		It("QuotaLimited condition is absent when max equals headroom", func() {
+			// With the generous initial quota (max=5, ceiling=5), the condition
+			// must never be True. Use Consistently to guard against transient flap.
+			Eventually(func() error {
+				return k8sClient.Get(ctx, key, &autoscalingv2.HorizontalPodAutoscaler{})
+			}, testTimeout, testInterval).Should(Succeed(), "wait for first reconcile")
+
+			Consistently(func(g Gomega) {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				g.Expect(k8sClient.Get(ctx, key, latest)).To(Succeed())
+				c := apimeta.FindStatusCondition(latest.Status.Conditions, agentraxv1alpha1.ConditionQuotaLimited)
+				g.Expect(c != nil && c.Status == metav1.ConditionTrue).To(BeFalse(),
+					"QuotaLimited should never be True when max == headroom")
+			}, 3*time.Second, testInterval).Should(Succeed())
 		})
 	})
 })

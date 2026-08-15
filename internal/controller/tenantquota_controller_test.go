@@ -350,6 +350,7 @@ var _ = Describe("TenantQuota Controller", func() {
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
+// makeTQ creates a TenantQuota object with the provided limits for test fixtures.
 func makeTQ(name, ns string, maxAgents, maxGPUs, maxTotalReplicas, maxReplicasPerAgent int32) *agentraxv1alpha1.TenantQuota { //nolint:unparam
 	return &agentraxv1alpha1.TenantQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},

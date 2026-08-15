@@ -22,6 +22,7 @@ import (
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 )
 
+// TestParseErrorRate verifies percentage string parsing across valid, invalid, and boundary inputs.
 func TestParseErrorRate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -62,6 +63,7 @@ func TestParseErrorRate(t *testing.T) {
 	}
 }
 
+// abs returns the absolute value of a float64.
 func abs(f float64) float64 {
 	if f < 0 {
 		return -f

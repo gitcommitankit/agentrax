@@ -57,7 +57,7 @@ func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager, enforcer *quota.En
 		For(&agentraxv1alpha1.AgentDeployment{}).
 		WithDefaulter(&AgentDeploymentCustomDefaulter{}).
 		WithValidator(&AgentDeploymentCustomValidator{
-			Client:   mgr.GetClient(),
+			Client:   mgr.GetAPIReader(),
 			Enforcer: enforcer,
 		}).
 		Complete()
@@ -118,7 +118,7 @@ func isZeroResources(r corev1.ResourceRequirements) bool {
 // AgentDeploymentCustomValidator validates AgentDeployment specs at admission
 // time. It implements admission.CustomValidator.
 type AgentDeploymentCustomValidator struct {
-	Client   client.Client
+	Client   client.Reader
 	Enforcer *quota.Enforcer
 }
 
@@ -126,6 +126,7 @@ var _ webhook.CustomValidator = &AgentDeploymentCustomValidator{}
 
 // ValidateCreate validates a new AgentDeployment against quota and spec rules.
 func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	start := time.Now()
 	ad, ok := obj.(*agentraxv1alpha1.AgentDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected AgentDeployment, got %T", obj)
@@ -133,6 +134,22 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 	webhookLog.Info("validating create", "name", ad.Name, "namespace", ad.Namespace)
 
 	allErrs := v.validateSpec(ctx, ad, nil)
+
+	latency := time.Since(start)
+	webhookLog.V(1).Info("admission complete",
+		"operation", "create",
+		"name", ad.Name,
+		"namespace", ad.Namespace,
+		"latency_ms", latency.Milliseconds(),
+		"admitted", len(allErrs) == 0)
+	if latency > 2*time.Second {
+		webhookLog.Info("slow admission request detected",
+			"operation", "create",
+			"name", ad.Name,
+			"namespace", ad.Namespace,
+			"latency_ms", latency.Milliseconds())
+	}
+
 	if len(allErrs) > 0 {
 		return nil, apierrors.NewInvalid(
 			agentraxv1alpha1.GroupVersion.WithKind("AgentDeployment").GroupKind(),
@@ -143,6 +160,7 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 
 // ValidateUpdate validates an updated AgentDeployment against quota and spec rules.
 func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	start := time.Now()
 	ad, ok := newObj.(*agentraxv1alpha1.AgentDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected AgentDeployment, got %T", newObj)
@@ -172,6 +190,22 @@ func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 	}
 
 	allErrs := v.validateSpec(ctx, ad, &oldAD.Spec)
+
+	latency := time.Since(start)
+	webhookLog.V(1).Info("admission complete",
+		"operation", "update",
+		"name", ad.Name,
+		"namespace", ad.Namespace,
+		"latency_ms", latency.Milliseconds(),
+		"admitted", len(allErrs) == 0)
+	if latency > 2*time.Second {
+		webhookLog.Info("slow admission request detected",
+			"operation", "update",
+			"name", ad.Name,
+			"namespace", ad.Namespace,
+			"latency_ms", latency.Milliseconds())
+	}
+
 	if len(allErrs) > 0 {
 		return nil, apierrors.NewInvalid(
 			agentraxv1alpha1.GroupVersion.WithKind("AgentDeployment").GroupKind(),
@@ -230,18 +264,36 @@ func (v *AgentDeploymentCustomValidator) validateSpec(
 		allErrs = append(allErrs, validateMCPTools(specPath.Child("mcp", "tools"), ad.Spec.MCP.Tools)...)
 	}
 
-	// ── 5. Quota admission check ──
-	// Compute current usage from the TenantQuota status. The status is kept
-	// accurate by the TenantQuota reconciler; we add in-flight reservations to
-	// handle concurrent near-limit creates.
+	// ── 5. Quota admission check (atomic check-and-reserve) ──
+	// AdmitAndReserve holds the in-flight mutex across both the quota check
+	// and the reservation write, preventing concurrent near-limit creates from
+	// both slipping through the quota ceiling.
+	// Only run when all earlier checks pass: a spec that is already invalid
+	// must not create a reservation that would transiently block valid admits.
 	admissionKey := fmt.Sprintf("%s/%s", ad.Namespace, ad.Name)
-	ok, reason := v.Enforcer.CanAdmit(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec)
-	if !ok {
-		allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
-	} else {
-		// Reserve in-flight slot for the duration the webhook response is in transit.
-		// The reservation is automatically swept after reservationTTL.
-		v.Enforcer.Reserve(admissionKey, ad.Spec, oldSpec, reservationTTL)
+	if len(allErrs) == 0 {
+		// Detect server-side dry-run to avoid creating reservations for
+		// requests that will never be persisted.
+		isDryRun := false
+		if req, err := admission.RequestFromContext(ctx); err == nil && req.DryRun != nil && *req.DryRun {
+			isDryRun = true
+		}
+
+		if isDryRun {
+			// For dry-run requests, perform the quota check without writing
+			// to the reservations map. This still acquires the mutex to read
+			// consistent in-flight state, but does not create a reservation.
+			ok, reason := v.Enforcer.CanAdmit(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec)
+			if !ok {
+				allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+			}
+		} else {
+			// For persisted requests, use the atomic check-and-reserve.
+			ok, reason := v.Enforcer.AdmitAndReserve(admissionKey, tq.Spec, tq.Status, ad.Spec, oldSpec, reservationTTL)
+			if !ok {
+				allErrs = append(allErrs, field.Forbidden(specPath, fmt.Sprintf("quota exceeded: %s", reason)))
+			}
+		}
 	}
 
 	return allErrs

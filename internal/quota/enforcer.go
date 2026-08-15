@@ -171,11 +171,9 @@ func (e *Enforcer) ComputeUsage(ads []agentraxv1alpha1.AgentDeploymentSpec) agen
 // by concurrent admission requests.
 //
 // admissionKey must be unique per AgentDeployment — use "namespace/adName".
-// It identifies the reservation slot for this specific AD so that a retried
-// webhook call replaces (not duplicates) any prior reservation, and so that
-// sibling ADs in the same TenantQuota each hold independent slots.
-// oldSpec may be nil for CREATE requests; for UPDATE requests it is the
-// previous spec so we can compute the delta rather than a full new addition.
+// CanAdmit is exported for use in dry-run validation where no reservation
+// should be created. For persisted requests, use AdmitAndReserve which
+// eliminates the TOCTOU window between checking and reserving.
 //
 // Returns (true, "") if admission is allowed, or (false, reason) if not.
 func (e *Enforcer) CanAdmit(
@@ -185,82 +183,178 @@ func (e *Enforcer) CanAdmit(
 	requested agentraxv1alpha1.AgentDeploymentSpec,
 	oldSpec *agentraxv1alpha1.AgentDeploymentSpec,
 ) (bool, string) {
-	// Compute the delta this request adds on top of committed usage.
-	// For CREATE: delta = full requested resources.
-	// For UPDATE: delta = requested - old (can be negative if scaling down).
-	var deltaAgents, deltaGPUs, deltaReplicas int32
+	delta := e.computeDelta(requested, oldSpec)
+	inFlight := e.sumInflight(admissionKey)
+	return evalQuotaRules(quota, committedUsage, inFlight, delta,
+		requested.Replicas.Max, sameTenantUpdate(requested, oldSpec), oldMax(oldSpec))
+}
+
+// sameTenantUpdate returns true for UPDATE operations where the tenant has not changed.
+// Returns false for CREATE (oldSpec == nil) or cross-tenant moves.
+func sameTenantUpdate(requested agentraxv1alpha1.AgentDeploymentSpec, oldSpec *agentraxv1alpha1.AgentDeploymentSpec) bool {
 	if oldSpec == nil {
-		// CREATE
-		deltaAgents = 1
-		deltaGPUs = e.gpusForAD(requested)
-		deltaReplicas = requested.Replicas.Max
-	} else {
-		// UPDATE — agent count doesn't change, only resources may shift.
-		deltaAgents = 0
-		deltaGPUs = e.gpusForAD(requested) - e.gpusForAD(*oldSpec)
-		deltaReplicas = requested.Replicas.Max - oldSpec.Replicas.Max
+		return false
+	}
+	return requested.TenantRef == oldSpec.TenantRef
+}
+
+// computeDelta returns the resource delta for this admission request.
+// For CREATE (oldSpec == nil): the full resources of one new agent.
+// For UPDATE with same TenantRef: only the incremental change relative to the previous spec.
+// For UPDATE with different TenantRef (tenant move): the FULL requested resources,
+// because the old allocation was never charged against the new tenant's quota.
+func (e *Enforcer) computeDelta(
+	requested agentraxv1alpha1.AgentDeploymentSpec,
+	oldSpec *agentraxv1alpha1.AgentDeploymentSpec,
+) reservationEntry {
+	if oldSpec == nil {
+		// CREATE: charge full amount
+		return reservationEntry{
+			agents:   1,
+			gpus:     e.gpusForAD(requested),
+			replicas: requested.Replicas.Max,
+		}
+	}
+	// UPDATE: check if tenant changed
+	if requested.TenantRef != oldSpec.TenantRef {
+		// Cross-tenant move: charge full amount to the new tenant
+		return reservationEntry{
+			agents:   1,
+			gpus:     e.gpusForAD(requested),
+			replicas: requested.Replicas.Max,
+		}
+	}
+	// Same tenant: charge only the delta
+	return reservationEntry{
+		agents:   0,
+		gpus:     e.gpusForAD(requested) - e.gpusForAD(*oldSpec),
+		replicas: requested.Replicas.Max - oldSpec.Replicas.Max,
+	}
+}
+
+// oldMax returns oldSpec.Replicas.Max or 0 for CREATE requests.
+func oldMax(oldSpec *agentraxv1alpha1.AgentDeploymentSpec) int32 {
+	if oldSpec == nil {
+		return 0
+	}
+	return oldSpec.Replicas.Max
+}
+
+// evalQuotaRules checks all four quota limits given committed usage, in-flight
+// totals, and the delta contributed by this request. It is a pure, lock-free
+// helper shared by canAdmit and AdmitAndReserve; callers are responsible for
+// holding any locks before reading in-flight state.
+// Returns (false, reason) for the first violated limit, or (true, "") otherwise.
+func evalQuotaRules(
+	quota agentraxv1alpha1.TenantQuotaSpec,
+	committedUsage agentraxv1alpha1.TenantQuotaStatus,
+	inFlight reservationEntry,
+	delta reservationEntry,
+	requestedMaxReplicas int32,
+	isUpdate bool,
+	prevMaxReplicas int32, // 0 for creates; used by per-agent ceiling check
+) (bool, string) {
+	// Reject the math.MaxInt32 sentinel used by gpusForAD to signal overflow.
+	// If delta.gpus is MaxInt32, the GPU calculation overflowed and we must
+	// fail closed to prevent undercount-based admission.
+	if delta.gpus == math.MaxInt32 {
+		return false, "GPU resource calculation overflowed; request denied"
 	}
 
-	// Add in-flight reservations (excluding this AD's own slot, which will
-	// be replaced when we Reserve below).
-	inFlight := e.sumInflight(admissionKey)
-
-	projectedAgents := committedUsage.UsedAgents + inFlight.agents + deltaAgents
-	projectedGPUs := committedUsage.UsedGPUs + inFlight.gpus + deltaGPUs
-	projectedReplicas := committedUsage.UsedTotalReplicas + inFlight.replicas + deltaReplicas
+	// Perform projection calculations in int64 to prevent overflow, then
+	// compare against int64-converted quota limits.
+	projAgents := int64(committedUsage.UsedAgents) + int64(inFlight.agents) + int64(delta.agents)
+	projGPUs := int64(committedUsage.UsedGPUs) + int64(inFlight.gpus) + int64(delta.gpus)
+	projReplicas := int64(committedUsage.UsedTotalReplicas) + int64(inFlight.replicas) + int64(delta.replicas)
 
 	// For UPDATE requests, only reject when the delta increases a dimension that
 	// is already at or over quota. If quota was lowered below current usage, the
 	// existing ADs are already OverQuota (indicated by the TQ condition) — we
 	// must not block updates that don't make things worse, otherwise finalizer
 	// removal and spec corrections are deadlocked.
-	isUpdate := oldSpec != nil
-
-	if projectedAgents > quota.MaxAgents && (!isUpdate || deltaAgents > 0) {
+	if projAgents > int64(quota.MaxAgents) && (!isUpdate || delta.agents > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxAgents (%d): current=%d in-flight=%d delta=%d",
-			quota.MaxAgents, committedUsage.UsedAgents, inFlight.agents, deltaAgents,
+			quota.MaxAgents, committedUsage.UsedAgents, inFlight.agents, delta.agents,
 		)
 	}
-	if quota.MaxGPUs > 0 && projectedGPUs > quota.MaxGPUs && (!isUpdate || deltaGPUs > 0) {
+	if projGPUs > int64(quota.MaxGPUs) && (!isUpdate || delta.gpus > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxGPUs (%d): current=%d in-flight=%d delta=%d",
-			quota.MaxGPUs, committedUsage.UsedGPUs, inFlight.gpus, deltaGPUs,
+			quota.MaxGPUs, committedUsage.UsedGPUs, inFlight.gpus, delta.gpus,
 		)
 	}
-	if projectedReplicas > quota.MaxTotalReplicas && (!isUpdate || deltaReplicas > 0) {
+	if projReplicas > int64(quota.MaxTotalReplicas) && (!isUpdate || delta.replicas > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxTotalReplicas (%d): current=%d in-flight=%d delta=%d",
-			quota.MaxTotalReplicas, committedUsage.UsedTotalReplicas, inFlight.replicas, deltaReplicas,
+			quota.MaxTotalReplicas, committedUsage.UsedTotalReplicas, inFlight.replicas, delta.replicas,
 		)
 	}
 	// MaxReplicasPerAgent is only enforced when the request would increase the
 	// per-agent replica ceiling. If the quota ceiling was lowered below an
 	// existing AD's replicas.max, updates that don't raise replicas.max further
 	// must still be allowed — blocking them would deadlock spec corrections.
-	if requested.Replicas.Max > quota.MaxReplicasPerAgent && (!isUpdate || requested.Replicas.Max > oldSpec.Replicas.Max) {
+	perAgentIncreases := !isUpdate || requestedMaxReplicas > prevMaxReplicas
+	if requestedMaxReplicas > quota.MaxReplicasPerAgent && perAgentIncreases {
 		return false, fmt.Sprintf(
 			"spec.replicas.max (%d) exceeds maxReplicasPerAgent (%d)",
-			requested.Replicas.Max, quota.MaxReplicasPerAgent,
+			requestedMaxReplicas, quota.MaxReplicasPerAgent,
 		)
 	}
-
 	return true, ""
 }
 
-// sumInflight returns the total in-flight resource counts excluding the entry
-// for excludeKey (so this AD's existing slot is not double-counted when the
-// same AD retries admission).
-func (e *Enforcer) sumInflight(excludeKey string) reservationEntry {
+// AdmitAndReserve is an atomic version of canAdmit followed by reserve.
+// It holds the in-flight mutex continuously from the quota check through the
+// reservation write, eliminating the TOCTOU window that exists when the two
+// operations are called separately: a concurrent near-limit create cannot slip
+// through because no other goroutine can observe stale in-flight counts between
+// the check and the write.
+//
+// Returns (true, "") and writes the reservation when admission is allowed.
+// Returns (false, reason) without touching the map when admission is denied.
+// The reservation expires after ttl and is cleaned up by the sweep goroutine.
+func (e *Enforcer) AdmitAndReserve(
+	admissionKey string,
+	quota agentraxv1alpha1.TenantQuotaSpec,
+	committedUsage agentraxv1alpha1.TenantQuotaStatus,
+	requested agentraxv1alpha1.AgentDeploymentSpec,
+	oldSpec *agentraxv1alpha1.AgentDeploymentSpec,
+	ttl time.Duration,
+) (bool, string) {
+	delta := e.computeDelta(requested, oldSpec)
+
+	// Hold the mutex for the entire check-then-reserve operation so no
+	// concurrent admission can observe an inconsistent in-flight snapshot.
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	now := e.nowFn()
+	inFlight := e.sumInflightLocked(admissionKey, now)
+
+	ok, reason := evalQuotaRules(quota, committedUsage, inFlight, delta,
+		requested.Replicas.Max, sameTenantUpdate(requested, oldSpec), oldMax(oldSpec))
+	if !ok {
+		return false, reason
+	}
+
+	// Admission passed — write the reservation under the same lock so the
+	// slot is visible to any concurrent AdmitAndReserve caller immediately.
+	e.reservations[admissionKey] = &reservationEntry{
+		agents:   delta.agents,
+		gpus:     delta.gpus,
+		replicas: delta.replicas,
+		expiry:   now.Add(ttl),
+	}
+	return true, ""
+}
+
+// sumInflightLocked returns the total in-flight resource counts excluding the
+// entry for excludeKey. The caller must hold e.mu before invoking this method.
+func (e *Enforcer) sumInflightLocked(excludeKey string, now time.Time) reservationEntry {
 	var total reservationEntry
 	for k, v := range e.reservations {
-		if k == excludeKey {
-			continue
-		}
-		if now.After(v.expiry) {
+		if k == excludeKey || now.After(v.expiry) {
 			continue
 		}
 		total.agents += v.agents
@@ -270,28 +364,27 @@ func (e *Enforcer) sumInflight(excludeKey string) reservationEntry {
 	return total
 }
 
-// Reserve creates or replaces an in-flight reservation for admissionKey (a
-// per-request unique string, e.g. UID of the AdmissionRequest) lasting ttl.
-// The reservation is automatically swept when it expires. Call Release when
-// the webhook handler returns (succeeded or failed), or let it expire on its
-// own if the process crashes.
-func (e *Enforcer) Reserve(admissionKey string, spec agentraxv1alpha1.AgentDeploymentSpec, oldSpec *agentraxv1alpha1.AgentDeploymentSpec, ttl time.Duration) {
-	var deltaAgents, deltaGPUs, deltaReplicas int32
-	if oldSpec == nil {
-		deltaAgents = 1
-		deltaGPUs = e.gpusForAD(spec)
-		deltaReplicas = spec.Replicas.Max
-	} else {
-		deltaGPUs = e.gpusForAD(spec) - e.gpusForAD(*oldSpec)
-		deltaReplicas = spec.Replicas.Max - oldSpec.Replicas.Max
-	}
+// sumInflight returns the total in-flight resource counts excluding the entry
+// for excludeKey (so this AD's existing slot is not double-counted when the
+// same AD retries admission).
+func (e *Enforcer) sumInflight(excludeKey string) reservationEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sumInflightLocked(excludeKey, e.nowFn())
+}
 
+// reserve creates or replaces an in-flight reservation for admissionKey lasting
+// ttl. It is intentionally unexported: production code must use AdmitAndReserve
+// to avoid the TOCTOU race between checking and reserving. Tests that need to
+// pre-seed the in-flight map in isolation may call this directly.
+func (e *Enforcer) reserve(admissionKey string, spec agentraxv1alpha1.AgentDeploymentSpec, oldSpec *agentraxv1alpha1.AgentDeploymentSpec, ttl time.Duration) {
+	delta := e.computeDelta(spec, oldSpec)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.reservations[admissionKey] = &reservationEntry{
-		agents:   deltaAgents,
-		gpus:     deltaGPUs,
-		replicas: deltaReplicas,
+		agents:   delta.agents,
+		gpus:     delta.gpus,
+		replicas: delta.replicas,
 		expiry:   e.nowFn().Add(ttl),
 	}
 }
@@ -314,7 +407,7 @@ func (e *Enforcer) IsOverQuota(
 	if usage.UsedAgents > quota.MaxAgents {
 		return true, fmt.Sprintf("usedAgents (%d) exceeds maxAgents (%d)", usage.UsedAgents, quota.MaxAgents)
 	}
-	if quota.MaxGPUs > 0 && usage.UsedGPUs > quota.MaxGPUs {
+	if usage.UsedGPUs > quota.MaxGPUs {
 		return true, fmt.Sprintf("usedGPUs (%d) exceeds maxGPUs (%d)", usage.UsedGPUs, quota.MaxGPUs)
 	}
 	if usage.UsedTotalReplicas > quota.MaxTotalReplicas {
