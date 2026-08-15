@@ -48,8 +48,6 @@ const (
 	canaryVariantLabel = "agentrax.io/variant"
 	// canaryVariantValue is the value of canaryVariantLabel for canary pods.
 	canaryVariantValue = "canary"
-	// stableVariantValue is the value of canaryVariantLabel for stable pods.
-	stableVariantValue = "stable"
 
 	// maxPauseExtensionMultiplier is the maximum total pause duration as a multiple
 	// of the configured pause duration. After this ceiling the evaluator runs regardless
@@ -139,10 +137,11 @@ func (c *Controller) Rollback(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 	// 1. Restore stable Deployment image to status.stableVersion.
 	if ad.Status.StableVersion != "" {
 		dep := &appsv1.Deployment{}
-		if err := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, dep); err != nil {
+		err := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, dep)
+		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("fetching stable deployment for rollback: %w", err)
 		}
-		if len(dep.Spec.Template.Spec.Containers) > 0 {
+		if err == nil && len(dep.Spec.Template.Spec.Containers) > 0 {
 			dep.Spec.Template.Spec.Containers[0].Image = ad.Status.StableVersion
 			if err := c.Client.Update(ctx, dep); err != nil {
 				return fmt.Errorf("restoring stable deployment image during rollback: %w", err)

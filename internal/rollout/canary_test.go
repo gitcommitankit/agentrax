@@ -36,10 +36,12 @@ import (
 	"github.com/gitcommitankit/agentrax/internal/metrics"
 )
 
+const testCanaryImage = "img:v2"
+
 // ── Controller unit tests ──────────────────────────────────────────────────
 
 // newTestController constructs a rollout.Controller with a fake client initialized with the scheme.
-func newTestController(initObjs ...runtime.Object) (*Controller, client.Client, *runtime.Scheme) {
+func newTestController(initObjs ...runtime.Object) (*Controller, client.Client) {
 	s := runtime.NewScheme()
 	_ = agentraxv1alpha1.AddToScheme(s)
 	_ = appsv1.AddToScheme(s)
@@ -61,7 +63,7 @@ func newTestController(initObjs ...runtime.Object) (*Controller, client.Client, 
 		GatewayNamespace: "agentrax-system",
 		FailSafeTimeout:  60 * time.Second,
 	}
-	return ctrl, cl, s
+	return ctrl, cl
 }
 
 // TestController_Step_SetWeight verifies that executing a setWeight step creates the canary
@@ -70,7 +72,7 @@ func TestController_Step_SetWeight(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -83,12 +85,12 @@ func TestController_Step_SetWeight(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:           agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:   "img:v1",
-			CanaryVersion:   "img:v2",
+			CanaryVersion:   testCanaryImage,
 			CanaryStepIndex: 0,
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	c, cl := newTestController(ad)
 	res, err := c.Step(context.Background(), ad)
 	if err != nil {
 		t.Fatalf("Step failed: %v", err)
@@ -101,7 +103,7 @@ func TestController_Step_SetWeight(t *testing.T) {
 	canaryDep := &appsv1.Deployment{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-agent-canary", Namespace: "default"}, canaryDep); err != nil {
 		t.Errorf("canary deployment not found: %v", err)
-	} else if len(canaryDep.Spec.Template.Spec.Containers) == 0 || canaryDep.Spec.Template.Spec.Containers[0].Image != "img:v2" {
+	} else if len(canaryDep.Spec.Template.Spec.Containers) == 0 || canaryDep.Spec.Template.Spec.Containers[0].Image != testCanaryImage {
 		t.Errorf("expected canary deployment image img:v2")
 	}
 
@@ -137,7 +139,7 @@ func TestController_Step_SelfHealing(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -150,13 +152,13 @@ func TestController_Step_SelfHealing(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:           agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:   "img:v1",
-			CanaryVersion:   "img:v2",
+			CanaryVersion:   testCanaryImage,
 			CanaryWeight:    20,
 			CanaryStepIndex: 1, // During pause step
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	c, cl := newTestController(ad)
 	// Canary deployment and HTTPRoute do NOT exist initially (simulating deletion).
 	_, err := c.Step(context.Background(), ad)
 	if err != nil {
@@ -190,7 +192,7 @@ func TestController_Rollback(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Replicas:  agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 5, Metric: "queueDepth", Target: 10},
 			Rollout: agentraxv1alpha1.RolloutPolicy{
@@ -201,7 +203,7 @@ func TestController_Rollback(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:         agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion: "img:v1",
-			CanaryVersion: "img:v2",
+			CanaryVersion: testCanaryImage,
 			CanaryWeight:  20,
 		},
 	}
@@ -209,7 +211,7 @@ func TestController_Rollback(t *testing.T) {
 	canaryDep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test-agent-canary", Namespace: "default"}}
 	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"}}
 
-	c, cl, _ := newTestController(ad, canaryDep, route)
+	c, cl := newTestController(ad, canaryDep, route)
 
 	err := c.Rollback(context.Background(), ad, "ManualAbort", "spec.rollout.abort was true")
 	if err != nil {
@@ -236,7 +238,7 @@ func TestController_Rollback(t *testing.T) {
 	if updated.Status.Phase != agentraxv1alpha1.PhaseRolloutFailed {
 		t.Errorf("expected Phase=RolloutFailed, got %s", updated.Status.Phase)
 	}
-	if updated.Status.CanaryVersion != "img:v2" {
+	if updated.Status.CanaryVersion != testCanaryImage {
 		t.Errorf("expected CanaryVersion=img:v2 to be preserved, got %s", updated.Status.CanaryVersion)
 	}
 }
@@ -246,14 +248,14 @@ func TestController_Promote(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Replicas:  agentraxv1alpha1.ScalingPolicy{Min: 1, Max: 5, Metric: "queueDepth", Target: 10},
 		},
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:         agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion: "img:v1",
-			CanaryVersion: "img:v2",
+			CanaryVersion: testCanaryImage,
 		},
 	}
 
@@ -269,7 +271,7 @@ func TestController_Promote(t *testing.T) {
 	}
 	canaryDep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test-agent-canary", Namespace: "default"}}
 
-	c, cl, _ := newTestController(ad, stableDep, canaryDep)
+	c, cl := newTestController(ad, stableDep, canaryDep)
 
 	err := c.promote(context.Background(), ad)
 	if err != nil {
@@ -279,7 +281,7 @@ func TestController_Promote(t *testing.T) {
 	// Verify stable deployment image was updated
 	updatedDep := &appsv1.Deployment{}
 	_ = cl.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, updatedDep)
-	if len(updatedDep.Spec.Template.Spec.Containers) == 0 || updatedDep.Spec.Template.Spec.Containers[0].Image != "img:v2" {
+	if len(updatedDep.Spec.Template.Spec.Containers) == 0 || updatedDep.Spec.Template.Spec.Containers[0].Image != testCanaryImage {
 		t.Errorf("expected stable deployment image img:v2, got %v", updatedDep.Spec.Template.Spec.Containers)
 	}
 
@@ -305,7 +307,7 @@ func TestController_PauseHPA_RestoreHPA(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 	}
 
-	c, cl, _ := newTestController(ad, existingHPA)
+	c, cl := newTestController(ad, existingHPA)
 
 	// Pause HPA
 	if err := c.PauseHPA(context.Background(), ad); err != nil {
@@ -330,7 +332,7 @@ func TestController_ExecutePause_InitialEntry(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -342,12 +344,12 @@ func TestController_ExecutePause_InitialEntry(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:           agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:   "img:v1",
-			CanaryVersion:   "img:v2",
+			CanaryVersion:   testCanaryImage,
 			CanaryStepIndex: 0,
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	c, cl := newTestController(ad)
 	res, err := c.executePause(context.Background(), ad, 0, 30*time.Second)
 	if err != nil {
 		t.Fatalf("executePause failed: %v", err)
@@ -372,7 +374,7 @@ func TestController_ExecutePause_Success_Advance(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -390,13 +392,13 @@ func TestController_ExecutePause_Success_Advance(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:           agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:   "img:v1",
-			CanaryVersion:   "img:v2",
+			CanaryVersion:   testCanaryImage,
 			CanaryStepIndex: 0,
 			PauseStartedAt:  &past,
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	c, cl := newTestController(ad)
 	c.PromClient = metrics.NewClient(srv.URL)
 
 	res, err := c.executePause(context.Background(), ad, 0, 30*time.Second)
@@ -424,7 +426,7 @@ func TestController_ExecutePause_PrometheusUnreachable_FailSafe(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -436,14 +438,14 @@ func TestController_ExecutePause_PrometheusUnreachable_FailSafe(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:                agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:        "img:v1",
-			CanaryVersion:        "img:v2",
+			CanaryVersion:        testCanaryImage,
 			CanaryStepIndex:      0,
 			PauseStartedAt:       &started,
 			PromUnreachableSince: &unreachableSince,
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	c, cl := newTestController(ad)
 	c.PromClient = metrics.NewClient("http://127.0.0.1:1") // Unreachable port
 	c.FailSafeTimeout = 60 * time.Second
 
@@ -467,7 +469,7 @@ func TestController_ExecutePause_SampleTooSmall(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
-			Image:     "img:v2",
+			Image:     testCanaryImage,
 			TenantRef: "team-a",
 			Rollout: agentraxv1alpha1.RolloutPolicy{
 				Strategy: "Canary",
@@ -482,13 +484,14 @@ func TestController_ExecutePause_SampleTooSmall(t *testing.T) {
 		Status: agentraxv1alpha1.AgentDeploymentStatus{
 			Phase:           agentraxv1alpha1.PhaseRolloutInProgress,
 			StableVersion:   "img:v1",
-			CanaryVersion:   "img:v2",
+			CanaryVersion:   testCanaryImage,
 			CanaryStepIndex: 0,
 			PauseStartedAt:  &past,
 		},
 	}
 
-	c, cl, _ := newTestController(ad)
+	canaryDep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test-agent-canary", Namespace: "default"}}
+	c, cl := newTestController(ad, canaryDep)
 	c.PromClient = metrics.NewClient(srv.URL)
 
 	res, err := c.executePause(context.Background(), ad, 0, 30*time.Second)
@@ -511,8 +514,8 @@ func TestController_ExecutePause_SampleTooSmall(t *testing.T) {
 		t.Errorf("expected Phase=RolloutInProgress, got %s (no rollback should occur)", updated.Status.Phase)
 	}
 	// Verify canary deployment still exists
-	canaryDep := &appsv1.Deployment{}
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-agent-canary", Namespace: "default"}, canaryDep); err != nil {
+	fetchedCanary := &appsv1.Deployment{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-agent-canary", Namespace: "default"}, fetchedCanary); err != nil {
 		t.Errorf("expected canary deployment to still exist (no rollback): %v", err)
 	}
 }

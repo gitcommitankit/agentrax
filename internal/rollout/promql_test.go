@@ -80,7 +80,7 @@ func buildVectorResponse(value float64) []byte {
 }
 
 // makeAD returns a minimal AgentDeployment for testing.
-func makeAD(name, ns string, maxErrorRate string, maxP99Ms int32, minSample int32) *agentraxv1alpha1.AgentDeployment {
+func makeAD(name, ns string, maxErrorRate string, maxP99Ms int32) *agentraxv1alpha1.AgentDeployment {
 	return &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: agentraxv1alpha1.AgentDeploymentSpec{
@@ -91,7 +91,7 @@ func makeAD(name, ns string, maxErrorRate string, maxP99Ms int32, minSample int3
 				Rollback: agentraxv1alpha1.RollbackPolicy{
 					MaxErrorRate:     maxErrorRate,
 					MaxP99LatencyMs:  maxP99Ms,
-					MinRequestSample: minSample,
+					MinRequestSample: 100,
 				},
 			},
 		},
@@ -103,7 +103,7 @@ func makeAD(name, ns string, maxErrorRate string, maxP99Ms int32, minSample int3
 // TestQueryTemplates verifies that the three PromQL query builders produce valid
 // queries that embed the AgentDeployment name, namespace, and window correctly.
 func TestQueryTemplates(t *testing.T) {
-	ad := makeAD("my-agent", "tenant-prod", "1%", 200, 100)
+	ad := makeAD("my-agent", "tenant-prod", "1%", 200)
 	window := 2 * time.Minute
 
 	reqQuery := requestCountQuery(ad.Name, ad.Namespace, window)
@@ -140,7 +140,7 @@ func TestEvaluate_AllWithinThresholds(t *testing.T) {
 	srv := prometheusServer(t, []float64{200.0, 0.005, 0.080})
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err != nil {
@@ -161,7 +161,7 @@ func TestEvaluate_SampleTooSmall(t *testing.T) {
 	srv := prometheusServer(t, []float64{42.0})
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err != nil {
@@ -185,7 +185,7 @@ func TestEvaluate_ErrorRateBreached(t *testing.T) {
 	srv := prometheusServer(t, []float64{500.0, 0.03, 0.050})
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err != nil {
@@ -206,7 +206,7 @@ func TestEvaluate_P99LatencyBreached(t *testing.T) {
 	srv := prometheusServer(t, []float64{500.0, 0.001, 350.0})
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err != nil {
@@ -226,7 +226,7 @@ func TestEvaluate_PrometheusUnreachable(t *testing.T) {
 	srv := errorServer()
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	_, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err == nil {
@@ -245,7 +245,7 @@ func TestEvaluate_EmptyVector(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "1%", 200, 100)
+	ad := makeAD("agent", "ns", "1%", 200)
 	_, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
 
 	if err == nil {
@@ -289,7 +289,7 @@ func TestEvaluate_InvalidMaxErrorRate(t *testing.T) {
 	srv := prometheusServer(t, []float64{200.0, 0.01, 100.0})
 	defer srv.Close()
 
-	ad := makeAD("agent", "ns", "not-a-percentage", 500, 100)
+	ad := makeAD("agent", "ns", "not-a-percentage", 500)
 	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 5*time.Minute)
 
 	if err != nil {
