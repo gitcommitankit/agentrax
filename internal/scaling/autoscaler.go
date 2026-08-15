@@ -111,8 +111,8 @@ func BuildHPA(ad *agentraxv1alpha1.AgentDeployment, quotaHeadroom int32) *autosc
 							},
 						},
 						Target: autoscalingv2.MetricTarget{
-							Type:  autoscalingv2.ValueMetricType,
-							Value: targetValue,
+							Type:         autoscalingv2.AverageValueMetricType,
+							AverageValue: targetValue,
 						},
 					},
 				},
