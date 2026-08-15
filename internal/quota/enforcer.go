@@ -254,28 +254,37 @@ func evalQuotaRules(
 	isUpdate bool,
 	prevMaxReplicas int32, // 0 for creates; used by per-agent ceiling check
 ) (bool, string) {
-	projAgents := committedUsage.UsedAgents + inFlight.agents + delta.agents
-	projGPUs := committedUsage.UsedGPUs + inFlight.gpus + delta.gpus
-	projReplicas := committedUsage.UsedTotalReplicas + inFlight.replicas + delta.replicas
+	// Reject the math.MaxInt32 sentinel used by gpusForAD to signal overflow.
+	// If delta.gpus is MaxInt32, the GPU calculation overflowed and we must
+	// fail closed to prevent undercount-based admission.
+	if delta.gpus == math.MaxInt32 {
+		return false, "GPU resource calculation overflowed; request denied"
+	}
+
+	// Perform projection calculations in int64 to prevent overflow, then
+	// compare against int64-converted quota limits.
+	projAgents := int64(committedUsage.UsedAgents) + int64(inFlight.agents) + int64(delta.agents)
+	projGPUs := int64(committedUsage.UsedGPUs) + int64(inFlight.gpus) + int64(delta.gpus)
+	projReplicas := int64(committedUsage.UsedTotalReplicas) + int64(inFlight.replicas) + int64(delta.replicas)
 
 	// For UPDATE requests, only reject when the delta increases a dimension that
 	// is already at or over quota. If quota was lowered below current usage, the
 	// existing ADs are already OverQuota (indicated by the TQ condition) — we
 	// must not block updates that don't make things worse, otherwise finalizer
 	// removal and spec corrections are deadlocked.
-	if projAgents > quota.MaxAgents && (!isUpdate || delta.agents > 0) {
+	if projAgents > int64(quota.MaxAgents) && (!isUpdate || delta.agents > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxAgents (%d): current=%d in-flight=%d delta=%d",
 			quota.MaxAgents, committedUsage.UsedAgents, inFlight.agents, delta.agents,
 		)
 	}
-	if projGPUs > quota.MaxGPUs && (!isUpdate || delta.gpus > 0) {
+	if projGPUs > int64(quota.MaxGPUs) && (!isUpdate || delta.gpus > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxGPUs (%d): current=%d in-flight=%d delta=%d",
 			quota.MaxGPUs, committedUsage.UsedGPUs, inFlight.gpus, delta.gpus,
 		)
 	}
-	if projReplicas > quota.MaxTotalReplicas && (!isUpdate || delta.replicas > 0) {
+	if projReplicas > int64(quota.MaxTotalReplicas) && (!isUpdate || delta.replicas > 0) {
 		return false, fmt.Sprintf(
 			"would exceed maxTotalReplicas (%d): current=%d in-flight=%d delta=%d",
 			quota.MaxTotalReplicas, committedUsage.UsedTotalReplicas, inFlight.replicas, delta.replicas,

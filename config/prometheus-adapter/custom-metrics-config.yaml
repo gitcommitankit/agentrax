@@ -9,7 +9,7 @@
 #   kubectl rollout restart deployment/prometheus-adapter -n monitoring
 #
 # Verify metrics are registered:
-#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
+#   kubectl get --raw /apis/external.metrics.k8s.io/v1beta1 | jq .
 #
 apiVersion: v1
 kind: ConfigMap

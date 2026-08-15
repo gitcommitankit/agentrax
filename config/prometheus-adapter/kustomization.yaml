@@ -14,8 +14,28 @@ namespace: monitoring
 resources:
   - custom-metrics-config.yaml
 
-# Patch removed: The prometheus-adapter Deployment is not included in this
-# kustomization's resources, so the patch has no valid target. Users should
-# apply this ConfigMap to their cluster and manually configure their existing
-# prometheus-adapter Deployment to mount it, or include the prometheus-adapter
-# base resources in this kustomization before re-adding the patch.
+# To apply this configuration, either:
+# 1. Include the prometheus-adapter Deployment base in resources above, then
+#    uncomment the patches section below, OR
+# 2. Manually configure your existing prometheus-adapter Deployment to mount
+#    this ConfigMap at /etc/adapter/config.yaml and pass --config=/etc/adapter/config.yaml
+#
+# patches:
+#   - target:
+#       kind: Deployment
+#       name: prometheus-adapter
+#     patch: |-
+#       - op: add
+#         path: /spec/template/spec/volumes/-
+#         value:
+#           name: adapter-config
+#           configMap:
+#             name: agentrax-custom-metrics
+#       - op: add
+#         path: /spec/template/spec/containers/0/volumeMounts/-
+#         value:
+#           name: adapter-config
+#           mountPath: /etc/adapter
+#       - op: add
+#         path: /spec/template/spec/containers/0/args/-
+#         value: --config=/etc/adapter/config.yaml
