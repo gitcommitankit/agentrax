@@ -121,8 +121,8 @@ func TestQueryTemplates(t *testing.T) {
 		if !strings.Contains(q, `app_kubernetes_io_name="my-agent"`) {
 			t.Errorf("%s query missing agent name selector: %q", name, q)
 		}
-		if !strings.Contains(q, `variant="canary"`) {
-			t.Errorf("%s query missing variant=canary selector: %q", name, q)
+		if !strings.Contains(q, `agentrax_io_variant="canary"`) {
+			t.Errorf("%s query missing agentrax_io_variant=canary selector: %q", name, q)
 		}
 		if !strings.Contains(q, "[2m0s]") {
 			t.Errorf("%s query missing duration window [2m0s]: %q", name, q)

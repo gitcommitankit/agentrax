@@ -48,7 +48,7 @@ Phases 2, 3, and 5 are independent of each other and can run in parallel once Ph
 
 The canary controller (`internal/rollout.Controller`) is a pure helper driven by the `AgentDeploymentReconciler` each reconcile cycle. When `spec.rollout.strategy: Canary` and `spec.image` differs from `status.stableVersion`, the reconciler transitions to `RolloutInProgress` and calls `Step()` on every subsequent reconcile.
 
-**State machine**: `setWeight` steps create the canary Deployment and upsert a Gateway API `HTTPRoute` with the target weight split. `pause` steps query Prometheus for request count (sample gate), error rate, and p99 latency via `internal/metrics.Client`. If Prometheus is unreachable for longer than `--fail-safe-timeout` (default 60s), a fail-safe rollback fires. Sample-size gating extends the pause window up to `3×pause_duration` before forcing evaluation. Promotion updates the stable Deployment image and restores the HPA; rollback reverts everything and sets `phase=RolloutFailed`.
+**State machine**: `setWeight` steps create the canary Deployment and upsert a Gateway API `HTTPRoute` with the target weight split. `pause` steps query Prometheus for request count (sample gate), error rate, and p99 latency via `internal/metrics.Client`. If Prometheus is unreachable for longer than a fixed 60-second timeout, a fail-safe rollback fires. Sample-size gating extends the pause window up to the lesser of `3×pause_duration` or an absolute 15-minute maximum before forcing evaluation. Promotion updates the stable Deployment image and restores the HPA; rollback reverts everything and sets `phase=RolloutFailed`.
 
 **New operator flags**: `--prometheus-url` (required for Canary), `--gateway-name`, `--gateway-namespace`.
 

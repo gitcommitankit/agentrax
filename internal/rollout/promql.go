@@ -35,10 +35,10 @@ import (
 // HTTP requests received by the canary pods over the given window.
 // The label selectors match the canary Deployment's pod labels:
 //   - app.kubernetes.io/name=<adName>
-//   - agentrax.io/variant=canary
+//   - agentrax.io/variant=canary (propagated from pod labels via ServiceMonitor)
 func requestCountQuery(adName, namespace string, window time.Duration) string {
 	return fmt.Sprintf(
-		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,variant="canary"}[%s]))`,
+		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s]))`,
 		namespace, adName, promDuration(window),
 	)
 }
@@ -49,9 +49,9 @@ func requestCountQuery(adName, namespace string, window time.Duration) string {
 func errorRateQuery(adName, namespace string, window time.Duration) string {
 	d := promDuration(window)
 	return fmt.Sprintf(
-		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,variant="canary",code=~"5.."}[%s]))`+
+		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary",code=~"5.."}[%s]))`+
 			` / on() group_left `+
-			`clamp_min(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,variant="canary"}[%s])), 1)`,
+			`clamp_min(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])), 1)`,
 		namespace, adName, d,
 		namespace, adName, d,
 	)
@@ -62,7 +62,7 @@ func errorRateQuery(adName, namespace string, window time.Duration) string {
 func p99LatencyQuery(adName, namespace string, window time.Duration) string {
 	return fmt.Sprintf(
 		`histogram_quantile(0.99, sum by (le) (`+
-			`rate(http_request_duration_milliseconds_bucket{namespace=%q,app_kubernetes_io_name=%q,variant="canary"}[%s])))`,
+			`rate(http_request_duration_milliseconds_bucket{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])))`,
 		namespace, adName, promDuration(window),
 	)
 }
@@ -137,26 +137,28 @@ func Evaluate(
 		return EvaluationResult{}, fmt.Errorf("querying error rate: %w", err)
 	}
 
-	if policy.MaxErrorRate != "" {
-		maxRate, parseErr := agentraxv1alpha1.ParseErrorRate(policy.MaxErrorRate)
-		if parseErr != nil {
-			// Misconfigured spec — treat as a breach to fail safe.
-			return EvaluationResult{
-				SampleCount:       sampleCount,
-				ErrorRate:         errorRate,
-				ThresholdBreached: true,
-				BreachReason:      fmt.Sprintf("invalid maxErrorRate %q: %v", policy.MaxErrorRate, parseErr),
-			}, nil
-		}
-		if errorRate > maxRate {
-			return EvaluationResult{
-				SampleCount:       sampleCount,
-				ErrorRate:         errorRate,
-				ThresholdBreached: true,
-				BreachReason: fmt.Sprintf("error rate %.2f%% exceeds threshold %.2f%%",
-					errorRate*100, maxRate*100),
-			}, nil
-		}
+	maxErrorRateStr := policy.MaxErrorRate
+	if maxErrorRateStr == "" {
+		maxErrorRateStr = "1%" // default
+	}
+	maxRate, parseErr := agentraxv1alpha1.ParseErrorRate(maxErrorRateStr)
+	if parseErr != nil {
+		// Misconfigured spec — treat as a breach to fail safe.
+		return EvaluationResult{
+			SampleCount:       sampleCount,
+			ErrorRate:         errorRate,
+			ThresholdBreached: true,
+			BreachReason:      fmt.Sprintf("invalid maxErrorRate %q: %v", maxErrorRateStr, parseErr),
+		}, nil
+	}
+	if errorRate > maxRate {
+		return EvaluationResult{
+			SampleCount:       sampleCount,
+			ErrorRate:         errorRate,
+			ThresholdBreached: true,
+			BreachReason: fmt.Sprintf("error rate %.2f%% exceeds threshold %.2f%%",
+				errorRate*100, maxRate*100),
+		}, nil
 	}
 
 	// ── 3. p99 latency threshold ──────────────────────────────────────────────
@@ -165,14 +167,18 @@ func Evaluate(
 		return EvaluationResult{}, fmt.Errorf("querying p99 latency: %w", err)
 	}
 
-	if policy.MaxP99LatencyMs > 0 && p99Ms > float64(policy.MaxP99LatencyMs) {
+	maxP99 := policy.MaxP99LatencyMs
+	if maxP99 <= 0 {
+		maxP99 = 500 // default 500ms
+	}
+	if p99Ms > float64(maxP99) {
 		return EvaluationResult{
 			SampleCount:       sampleCount,
 			ErrorRate:         errorRate,
 			P99LatencyMs:      p99Ms,
 			ThresholdBreached: true,
 			BreachReason: fmt.Sprintf("p99 latency %.1fms exceeds threshold %dms",
-				p99Ms, policy.MaxP99LatencyMs),
+				p99Ms, maxP99),
 		}, nil
 	}
 

@@ -24,10 +24,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -88,10 +90,13 @@ func (c *Controller) Step(ctx context.Context, ad *agentraxv1alpha1.AgentDeploym
 		"canaryStepIndex", ad.Status.CanaryStepIndex,
 	)
 
-	// Self-heal canary resources (Deployment and HTTPRoute) if they drift or are deleted out-of-band.
+	// Self-heal canary resources (Deployment, Service, and HTTPRoute) if they drift or are deleted out-of-band.
 	if ad.Status.CanaryVersion != "" {
 		if err := c.ensureCanaryDeployment(ctx, ad); err != nil {
 			return ctrl.Result{}, fmt.Errorf("self-healing canary deployment: %w", err)
+		}
+		if err := c.ensureCanaryService(ctx, ad); err != nil {
+			return ctrl.Result{}, fmt.Errorf("self-healing canary service: %w", err)
 		}
 	}
 	if ad.Status.CanaryWeight > 0 {
@@ -131,24 +136,43 @@ func (c *Controller) Rollback(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 	logger := log.FromContext(ctx).WithValues("name", ad.Name, "namespace", ad.Namespace)
 	logger.Info("rolling back canary", "reason", reason, "message", message)
 
-	// 1. Delete canary Deployment.
+	// 1. Restore stable Deployment image to status.stableVersion.
+	if ad.Status.StableVersion != "" {
+		dep := &appsv1.Deployment{}
+		if err := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, dep); err != nil {
+			return fmt.Errorf("fetching stable deployment for rollback: %w", err)
+		}
+		if len(dep.Spec.Template.Spec.Containers) > 0 {
+			dep.Spec.Template.Spec.Containers[0].Image = ad.Status.StableVersion
+			if err := c.Client.Update(ctx, dep); err != nil {
+				return fmt.Errorf("restoring stable deployment image during rollback: %w", err)
+			}
+		}
+	}
+
+	// 2. Delete canary Deployment.
 	if err := c.deleteCanaryDeployment(ctx, ad); err != nil {
 		return fmt.Errorf("deleting canary deployment during rollback: %w", err)
 	}
 
-	// 2. Reset HTTPRoute to 100% stable, then delete it.
+	// 3. Delete canary Service.
+	if err := c.deleteCanaryService(ctx, ad); err != nil {
+		return fmt.Errorf("deleting canary service during rollback: %w", err)
+	}
+
+	// 4. Reset HTTPRoute to 100% stable, then delete it.
 	// Deleting the HTTPRoute is cleaner than leaving it at 100%; the stable
 	// Service continues to receive all traffic directly from the parent Gateway.
 	if err := c.deleteHTTPRoute(ctx, ad); err != nil {
 		return fmt.Errorf("deleting httproute during rollback: %w", err)
 	}
 
-	// 3. Restore stable HPA.
+	// 5. Restore stable HPA.
 	if err := c.restoreHPA(ctx, ad); err != nil {
 		return fmt.Errorf("restoring HPA during rollback: %w", err)
 	}
 
-	// 4. Update status.
+	// 6. Update status.
 	latest := &agentraxv1alpha1.AgentDeployment{}
 	if err := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, latest); err != nil {
 		return fmt.Errorf("re-fetching AD for rollback status update: %w", err)
@@ -194,6 +218,11 @@ func (c *Controller) executeSetWeight(ctx context.Context, ad *agentraxv1alpha1.
 		return ctrl.Result{}, fmt.Errorf("ensuring canary deployment (step %d): %w", idx, err)
 	}
 
+	// Ensure the canary Service exists.
+	if err := c.ensureCanaryService(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensuring canary service (step %d): %w", idx, err)
+	}
+
 	stableWeight := int32(100) - weight
 
 	// Upsert the HTTPRoute with the target traffic split.
@@ -214,8 +243,8 @@ func (c *Controller) executeSetWeight(ctx context.Context, ad *agentraxv1alpha1.
 	}
 
 	// If the new step index is a setWeight:100 that was the last step, promote
-	// immediately on the next reconcile (requeue now).
-	return ctrl.Result{Requeue: true}, nil
+	// immediately on the next reconcile (requeue after 1 second).
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 // ── Pause step ────────────────────────────────────────────────────────────────
@@ -249,6 +278,9 @@ func (c *Controller) executePause(ctx context.Context, ad *agentraxv1alpha1.Agen
 
 	elapsed := now.Time.Sub(latest.Status.PauseStartedAt.Time)
 	maxWait := time.Duration(maxPauseExtensionMultiplier) * duration
+	if maxWait > 15*time.Minute {
+		maxWait = 15 * time.Minute
+	}
 
 	// ── Evaluate thresholds ───────────────────────────────────────────────────
 	result, evalErr := Evaluate(ctx, c.PromClient, latest, duration)
@@ -323,7 +355,7 @@ func (c *Controller) executePause(ctx context.Context, ad *agentraxv1alpha1.Agen
 		return ctrl.Result{}, fmt.Errorf("advancing step index after pause: %w", err)
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 // ── Promotion ─────────────────────────────────────────────────────────────────
@@ -334,6 +366,11 @@ func (c *Controller) executePause(ctx context.Context, ad *agentraxv1alpha1.Agen
 func (c *Controller) promote(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 	logger := log.FromContext(ctx).WithValues("name", ad.Name, "namespace", ad.Namespace)
 	logger.Info("promoting canary to stable", "newImage", ad.Status.CanaryVersion)
+
+	// 0. Guard against empty CanaryVersion.
+	if ad.Status.CanaryVersion == "" {
+		return fmt.Errorf("cannot promote: canaryVersion is empty")
+	}
 
 	// 1. Update stable Deployment image.
 	dep := &appsv1.Deployment{}
@@ -352,17 +389,22 @@ func (c *Controller) promote(ctx context.Context, ad *agentraxv1alpha1.AgentDepl
 		return fmt.Errorf("deleting canary deployment during promotion: %w", err)
 	}
 
-	// 3. Delete HTTPRoute (traffic fully on stable Service again).
+	// 3. Delete canary Service.
+	if err := c.deleteCanaryService(ctx, ad); err != nil {
+		return fmt.Errorf("deleting canary service during promotion: %w", err)
+	}
+
+	// 4. Delete HTTPRoute (traffic fully on stable Service again).
 	if err := c.deleteHTTPRoute(ctx, ad); err != nil {
 		return fmt.Errorf("deleting httproute during promotion: %w", err)
 	}
 
-	// 4. Restore HPA.
+	// 5. Restore HPA.
 	if err := c.restoreHPA(ctx, ad); err != nil {
 		return fmt.Errorf("restoring HPA during promotion: %w", err)
 	}
 
-	// 5. Update status.
+	// 6. Update status.
 	latest := &agentraxv1alpha1.AgentDeployment{}
 	if err := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, latest); err != nil {
 		return fmt.Errorf("re-fetching AD for promotion status update: %w", err)
@@ -398,27 +440,29 @@ func (c *Controller) ensureCanaryDeployment(ctx context.Context, ad *agentraxv1a
 	desired := c.desiredCanaryDeployment(ad, canaryName)
 
 	existing := &appsv1.Deployment{}
-	err := c.Client.Get(ctx, types.NamespacedName{Name: canaryName, Namespace: ad.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		if err := controllerutil.SetControllerReference(ad, desired, c.Scheme); err != nil {
-			return fmt.Errorf("setting owner ref on canary deployment: %w", err)
+	existing.Name = canaryName
+	existing.Namespace = ad.Namespace
+
+	_, err := controllerutil.CreateOrUpdate(ctx, c.Client, existing, func() error {
+		existing.Labels = desired.Labels
+
+		// Preserve the existing immutable selector on update; only set it on create
+		if existing.ResourceVersion == "" {
+			existing.Spec.Selector = desired.Spec.Selector
 		}
-		if err := c.Client.Create(ctx, desired); err != nil {
-			return fmt.Errorf("creating canary deployment: %w", err)
+
+		// Reconcile the complete pod template
+		existing.Spec.Replicas = desired.Spec.Replicas
+		existing.Spec.Template.Labels = desired.Spec.Template.Labels
+		existing.Spec.Template.Spec = desired.Spec.Template.Spec
+
+		if err := controllerutil.SetControllerReference(ad, existing, c.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
 		}
 		return nil
-	}
+	})
 	if err != nil {
-		return fmt.Errorf("getting canary deployment: %w", err)
-	}
-
-	// Update image if it has drifted.
-	if len(existing.Spec.Template.Spec.Containers) > 0 &&
-		existing.Spec.Template.Spec.Containers[0].Image != ad.Status.CanaryVersion {
-		existing.Spec.Template.Spec.Containers[0].Image = ad.Status.CanaryVersion
-		if err := c.Client.Update(ctx, existing); err != nil {
-			return fmt.Errorf("updating canary deployment image: %w", err)
-		}
+		return fmt.Errorf("reconciling canary deployment: %w", err)
 	}
 	return nil
 }
@@ -481,6 +525,86 @@ func (c *Controller) deleteCanaryDeployment(ctx context.Context, ad *agentraxv1a
 	return nil
 }
 
+// ── Canary Service ────────────────────────────────────────────────────────────
+
+// ensureCanaryService creates or updates the canary Service (<name>-canary)
+// with a selector that targets only canary pods (variant=canary label).
+func (c *Controller) ensureCanaryService(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	canaryName := ad.Name + canaryDeploymentSuffix
+	desired := c.desiredCanaryService(ad, canaryName)
+
+	existing := &corev1.Service{}
+	existing.Name = canaryName
+	existing.Namespace = ad.Namespace
+
+	_, err := controllerutil.CreateOrUpdate(ctx, c.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		existing.Spec.Selector = desired.Spec.Selector
+		existing.Spec.Ports = desired.Spec.Ports
+		existing.Spec.Type = desired.Spec.Type
+
+		if err := controllerutil.SetControllerReference(ad, existing, c.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling canary service: %w", err)
+	}
+	return nil
+}
+
+// desiredCanaryService builds the spec for the canary Service.
+func (c *Controller) desiredCanaryService(ad *agentraxv1alpha1.AgentDeployment, name string) *corev1.Service {
+	port := ad.Spec.Port
+	if port == 0 {
+		port = 8080
+	}
+	labels := map[string]string{
+		"app.kubernetes.io/name":       ad.Name,
+		"app.kubernetes.io/managed-by": "agentrax",
+		"agentrax.io/tenant":           ad.Spec.TenantRef,
+		canaryVariantLabel:             canaryVariantValue,
+	}
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ad.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "agent",
+					Port:       port,
+					TargetPort: intstr.FromInt32(port),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+}
+
+// deleteCanaryService removes the canary Service. Not-found is tolerated.
+func (c *Controller) deleteCanaryService(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	svc := &corev1.Service{}
+	canaryName := ad.Name + canaryDeploymentSuffix
+	err := c.Client.Get(ctx, types.NamespacedName{Name: canaryName, Namespace: ad.Namespace}, svc)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting canary service for deletion: %w", err)
+	}
+	if err := c.Client.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting canary service: %w", err)
+	}
+	return nil
+}
+
 // ── HTTPRoute ─────────────────────────────────────────────────────────────────
 
 // ensureHTTPRoute creates or updates an HTTPRoute that splits traffic between
@@ -503,6 +627,16 @@ func (c *Controller) ensureHTTPRoute(ctx context.Context, ad *agentraxv1alpha1.A
 	}
 	if err != nil {
 		return fmt.Errorf("getting httproute: %w", err)
+	}
+
+	// Set controller reference on existing HTTPRoute if not already set.
+	if err := controllerutil.SetControllerReference(ad, existing, c.Scheme); err != nil {
+		return fmt.Errorf("setting controller reference on existing httproute: %w", err)
+	}
+
+	// Skip update if spec already matches.
+	if equality.Semantic.DeepEqual(existing.Spec, desired.Spec) {
+		return nil
 	}
 
 	// Update weights if they have changed.
@@ -622,22 +756,27 @@ func (c *Controller) PauseHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 // recompute the correct quota headroom on its next cycle and update accordingly.
 func (c *Controller) restoreHPA(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 	// headroom=0 is conservative: the main reconciler will fix it on the next cycle.
-	hpa := scaling.BuildHPA(ad, 0)
-	if err := controllerutil.SetControllerReference(ad, hpa, c.Scheme); err != nil {
-		return fmt.Errorf("setting owner ref on restored HPA: %w", err)
-	}
+	desired := scaling.BuildHPA(ad, 0)
 
 	existing := &autoscalingv2.HorizontalPodAutoscaler{}
-	createErr := c.Client.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, existing)
-	if apierrors.IsNotFound(createErr) {
-		if err := c.Client.Create(ctx, hpa); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating HPA during restore: %w", err)
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+
+	_, err := controllerutil.CreateOrUpdate(ctx, c.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		existing.Spec.ScaleTargetRef = desired.Spec.ScaleTargetRef
+		existing.Spec.MinReplicas = desired.Spec.MinReplicas
+		existing.Spec.MaxReplicas = desired.Spec.MaxReplicas
+		existing.Spec.Metrics = desired.Spec.Metrics
+		existing.Spec.Behavior = desired.Spec.Behavior
+
+		if err := controllerutil.SetControllerReference(ad, existing, c.Scheme); err != nil {
+			return fmt.Errorf("setting controller reference: %w", err)
 		}
 		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("restoring HPA: %w", err)
 	}
-	if createErr != nil {
-		return fmt.Errorf("checking HPA existence during restore: %w", createErr)
-	}
-	// Already exists — the main reconciler will reconcile it properly on its next cycle.
 	return nil
 }

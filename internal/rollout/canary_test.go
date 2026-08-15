@@ -93,8 +93,8 @@ func TestController_Step_SetWeight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Step failed: %v", err)
 	}
-	if !res.Requeue {
-		t.Errorf("expected Requeue=true after setWeight")
+	if res.RequeueAfter != time.Second {
+		t.Errorf("expected RequeueAfter=1s after setWeight, got %v", res.RequeueAfter)
 	}
 
 	// Verify canary Deployment was created
@@ -158,7 +158,10 @@ func TestController_Step_SelfHealing(t *testing.T) {
 
 	c, cl, _ := newTestController(ad)
 	// Canary deployment and HTTPRoute do NOT exist initially (simulating deletion).
-	_, _ = c.Step(context.Background(), ad)
+	_, err := c.Step(context.Background(), ad)
+	if err != nil {
+		t.Fatalf("Step failed during self-healing: %v", err)
+	}
 
 	// Verify both were restored by self-healing
 	canaryDep := &appsv1.Deployment{}
@@ -168,6 +171,17 @@ func TestController_Step_SelfHealing(t *testing.T) {
 	route := &gatewayv1.HTTPRoute{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, route); err != nil {
 		t.Errorf("expected self-healing to recreate httproute: %v", err)
+	} else {
+		// Validate traffic split is 80/20
+		if len(route.Spec.Rules) == 0 || len(route.Spec.Rules[0].BackendRefs) < 2 {
+			t.Errorf("expected 2 backend refs in restored HTTPRoute")
+		} else {
+			w0 := *route.Spec.Rules[0].BackendRefs[0].Weight
+			w1 := *route.Spec.Rules[0].BackendRefs[1].Weight
+			if w0 != 80 || w1 != 20 {
+				t.Errorf("expected weights (80, 20), got (%d, %d)", w0, w1)
+			}
+		}
 	}
 }
 
@@ -389,8 +403,8 @@ func TestController_ExecutePause_Success_Advance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executePause failed: %v", err)
 	}
-	if !res.Requeue {
-		t.Errorf("expected Requeue=true after pause completion to process next step")
+	if res.RequeueAfter != time.Second {
+		t.Errorf("expected RequeueAfter=1s after pause completion to process next step, got %v", res.RequeueAfter)
 	}
 
 	updated := &agentraxv1alpha1.AgentDeployment{}
@@ -490,6 +504,16 @@ func TestController_ExecutePause_SampleTooSmall(t *testing.T) {
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, agentraxv1alpha1.ConditionSampleInsufficient)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Errorf("expected ConditionSampleInsufficient to be True")
+	}
+
+	// Verify no rollback occurred: phase should remain RolloutInProgress
+	if updated.Status.Phase != agentraxv1alpha1.PhaseRolloutInProgress {
+		t.Errorf("expected Phase=RolloutInProgress, got %s (no rollback should occur)", updated.Status.Phase)
+	}
+	// Verify canary deployment still exists
+	canaryDep := &appsv1.Deployment{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-agent-canary", Namespace: "default"}, canaryDep); err != nil {
+		t.Errorf("expected canary deployment to still exist (no rollback): %v", err)
 	}
 }
 

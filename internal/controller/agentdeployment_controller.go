@@ -161,22 +161,9 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Reconcile child Deployment.
-	if err := r.reconcileDeployment(ctx, ad); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
-	}
-
-	// 4. Reconcile child Service.
-	if err := r.reconcileService(ctx, ad); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
-	}
-
-	// 5. Reconcile ServiceMonitor when Prometheus Operator is present.
-	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
-	}
-
-	// 5.5. Handle canary rollout lifecycle.
+	// 3. Handle canary rollout lifecycle before reconciling stable Deployment.
+	// During rollout, the stable Deployment image must remain at status.stableVersion,
+	// not spec.image. Canary handling determines which image to use for stable resources.
 	if r.CanaryController != nil {
 		// Manual abort: spec.rollout.abort=true triggers immediate rollback.
 		if isAbortRequested(ad) {
@@ -203,7 +190,22 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// 6. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
+	// 4. Reconcile child Deployment.
+	if err := r.reconcileDeployment(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
+	}
+
+	// 5. Reconcile child Service.
+	if err := r.reconcileService(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
+	}
+
+	// 6. Reconcile ServiceMonitor when Prometheus Operator is present.
+	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
+	}
+
+	// 7. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
 	// reconcileHPA also returns the quota evaluation state so updateStatus can
 	// write the correct QuotaLimited condition onto the freshly re-fetched object.
 	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
@@ -211,7 +213,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
 	}
 
-	// 7. Derive status from the live Deployment and update it — always last.
+	// 8. Derive status from the live Deployment and update it — always last.
 	// We continue into updateStatus even when hpaResult requests a requeue so
 	// that the QuotaLimited condition is written in the same reconcile cycle.
 	// Return the shorter of the two requeue intervals.
@@ -592,15 +594,19 @@ func (r *AgentDeploymentReconciler) detectImagePullFailure(ctx context.Context, 
 // ── Desired-state builders ────────────────────────────────────────────────────
 
 // agentLabels returns the canonical label set applied to all resources owned by ad.
+// For stable resources (Deployment, Service), this includes variant=stable.
 func agentLabels(ad *agentraxv1alpha1.AgentDeployment) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       ad.Name,
 		"app.kubernetes.io/managed-by": "agentrax",
 		"agentrax.io/tenant":           ad.Spec.TenantRef,
+		"agentrax.io/variant":          "stable",
 	}
 }
 
 // desiredDeployment builds the Deployment spec the reconciler wants to exist.
+// During a canary rollout (PhaseRolloutInProgress), the stable Deployment image
+// is frozen at status.stableVersion; otherwise it tracks spec.image.
 func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.AgentDeployment) *appsv1.Deployment {
 	port := ad.Spec.Port
 	if port == 0 {
@@ -609,6 +615,12 @@ func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.Agent
 
 	labels := agentLabels(ad)
 	replicas := ad.Spec.Replicas.Min
+
+	// During rollout, freeze the stable Deployment at status.stableVersion.
+	image := ad.Spec.Image
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress && ad.Status.StableVersion != "" {
+		image = ad.Status.StableVersion
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -631,7 +643,7 @@ func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.Agent
 							// Use a fixed container name that is always DNS-1035 compliant.
 							// The AgentDeployment name is used at the object level, not container level.
 							Name:  "agent",
-							Image: ad.Spec.Image,
+							Image: image,
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "agent",
@@ -699,12 +711,13 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 			Selector: metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-			// Carry the two labels used by the HPA ExternalMetric selector into
-			// every scraped sample. Prometheus will sanitize the dots to underscores
-			// during ingestion (app.kubernetes.io/name → app_kubernetes_io_name).
+			// Carry labels into every scraped sample. Prometheus will sanitize the dots
+			// to underscores during ingestion (app.kubernetes.io/name → app_kubernetes_io_name,
+			// agentrax.io/variant → agentrax_io_variant).
 			TargetLabels: []string{
 				"app.kubernetes.io/name",
 				"app.kubernetes.io/managed-by",
+				"agentrax.io/variant",
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
