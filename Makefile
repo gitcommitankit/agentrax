@@ -76,6 +76,10 @@ lint: golangci-lint ## Run golangci-lint linter
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
+.PHONY: setup-git-hooks
+setup-git-hooks: ## Install pre-commit and pre-push Git hooks.
+	./hack/setup-git-hooks.sh
+
 ##@ Build
 
 .PHONY: build
