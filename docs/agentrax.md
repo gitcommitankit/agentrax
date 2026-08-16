@@ -58,7 +58,7 @@ The canary controller (`internal/rollout.Controller`) is a pure helper driven by
 
 The MCP registry is an embedded HTTP service inside the operator manager process, served on `--registry-bind-address` (default `:9090`) and exposed to the cluster as the `agentrax-registry` ClusterIP Service in `agentrax-system`.
 
-**Registration flow**: When `spec.mcp.expose: true` and the agent's underlying Deployment reports `rolloutComplete` (`phase=Running`), the reconciler calls `registry.Registrar.Register()`, which performs an MCP-level `initialize` JSON-RPC 2.0 handshake against `http://{name}.{namespace}.svc:{port}/`. Discovered tools are merged with `spec.mcp.tools` and persisted to the in-memory registry map and `agentrax-registry` ConfigMap. On failure, `MCPHandshakeFailed` condition is set and `status.registered` remains `false`.
+**Registration flow**: When `spec.mcp.expose: true` and the agent's underlying Deployment reports `rolloutComplete` (`phase=Running`), the reconciler calls `registry.Registrar.Register()`, which performs an MCP-level `initialize` JSON-RPC 2.0 handshake by posting to the `/initialize` sub-path at `http://{name}.{namespace}.svc:{port}/initialize`. Discovered tools are merged with `spec.mcp.tools` and persisted to the in-memory registry map and `agentrax-registry` ConfigMap. On failure, `MCPHandshakeFailed` condition is set and `status.registered` remains `false`.
 
 **TTL & Heartbeat**: Every registry entry carries a `TTL` (default 90s) and `HeartbeatAt` timestamp. When an agent is `status.registered: true` and healthy in `Running` phase, the reconciler triggers `Registrar.Heartbeat()`. A background sweeper running every 30s removes expired entries if heartbeats lapse (e.g. following an ungraceful pod termination). After 3 consecutive heartbeat probe failures, the agent is automatically deregistered.
 
@@ -68,9 +68,9 @@ The MCP registry is an embedded HTTP service inside the operator manager process
 
 **REST API Endpoints**:
 - `GET /agents`: List all active, non-expired registered agents.
-- `POST /agents`: Register / update an agent and refresh heartbeat.
+- `POST /agents`: Register / update an agent. This endpoint requires a successful MCP initialize handshake and currently requires no authentication. It bypasses the handshake verification when called directly.
 - `GET /agents/{namespace}/{name}`: Get metadata and tools for a specific agent.
-- `DELETE /agents/{namespace}/{name}`: Deregister an agent.
+- `DELETE /agents/{namespace}/{name}`: Deregister an agent. This endpoint currently requires no authentication.
 - *(Legacy aliases `POST /register` and `DELETE /deregister` are supported for backward compatibility)*.
 
 **New operator flags**: `--registry-bind-address` (default `:9090`).

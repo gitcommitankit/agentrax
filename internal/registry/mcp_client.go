@@ -149,7 +149,7 @@ func (c *httpMCPClient) Initialize(ctx context.Context, endpoint string) ([]stri
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("MCP initialize returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 

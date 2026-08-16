@@ -31,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -78,6 +79,7 @@ type Entry struct {
 // persists state to a ConfigMap, and sweeps expired entries.
 type Registry struct {
 	mu            sync.RWMutex
+	persistMu     sync.Mutex
 	entries       map[string]*Entry
 	client        client.Client
 	namespace     string
@@ -127,7 +129,12 @@ func (r *Registry) Start(ctx context.Context) {
 // runSweeper periodically deletes entries whose heartbeats have exceeded their TTL.
 func (r *Registry) runSweeper(ctx context.Context) {
 	logger := log.FromContext(ctx).WithName("mcp-registry-sweeper")
-	ticker := time.NewTicker(r.sweepInterval)
+
+	r.mu.RLock()
+	interval := r.sweepInterval
+	r.mu.RUnlock()
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -287,31 +294,36 @@ func (r *Registry) List() []*Entry {
 
 // persistToConfigMap writes the current entries to the agentrax-registry ConfigMap.
 func (r *Registry) persistToConfigMap(ctx context.Context) error {
-	r.mu.RLock()
-	data, err := json.Marshal(r.entries)
-	r.mu.RUnlock()
-	if err != nil {
-		return fmt.Errorf("marshaling registry state: %w", err)
-	}
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
 
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.configMapName,
-			Namespace: r.namespace,
-		},
-	}
-
-	_, err = controllerutil.CreateOrUpdate(ctx, r.client, cm, func() error {
-		if cm.Data == nil {
-			cm.Data = make(map[string]string)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		r.mu.RLock()
+		data, err := json.Marshal(r.entries)
+		r.mu.RUnlock()
+		if err != nil {
+			return fmt.Errorf("marshaling registry state: %w", err)
 		}
-		cm.Data[configMapKey] = string(data)
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      r.configMapName,
+				Namespace: r.namespace,
+			},
+		}
+
+		_, err = controllerutil.CreateOrUpdate(ctx, r.client, cm, func() error {
+			if cm.Data == nil {
+				cm.Data = make(map[string]string)
+			}
+			cm.Data[configMapKey] = string(data)
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("persisting registry ConfigMap: %w", err)
+		}
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("persisting registry ConfigMap: %w", err)
-	}
-	return nil
 }
 
 // loadFromConfigMap reads and restores entries from the agentrax-registry ConfigMap.

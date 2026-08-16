@@ -31,6 +31,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -173,7 +174,11 @@ var _ = BeforeSuite(func() {
 			Name: "agentrax-system",
 		},
 	}
-	_ = k8sClient.Create(ctx, systemNamespace)
+	if err = k8sClient.Create(ctx, systemNamespace); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to create agentrax-system namespace")
+		}
+	}
 
 	// Start the controller manager so the reconciler runs during integration tests.
 	// Use envtest's webhook host/port so the manager's webhook server binds to the
@@ -202,9 +207,6 @@ var _ = BeforeSuite(func() {
 		GPUResourceName: quota.DefaultGPUResourceName,
 		Registrar:       testRegistrar,
 	}
-	testReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
-		return testRegistrar.Deregister(ctx, ad)
-	})
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&TenantQuotaReconciler{

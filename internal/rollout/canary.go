@@ -432,6 +432,12 @@ func (c *Controller) promote(ctx context.Context, ad *agentraxv1alpha1.AgentDepl
 	if c.Registrar != nil && latest.Spec.MCP.Expose {
 		if err := c.Registrar.Register(ctx, latest); err != nil {
 			logger.Error(err, "MCP re-registration after promotion failed; reconciler will retry on next cycle")
+		} else if !latest.Status.Registered {
+			// Registration succeeded but status not yet set - update it.
+			latest.Status.Registered = true
+			if err := c.Client.Status().Update(ctx, latest); err != nil {
+				logger.Error(err, "failed to update registration status after promotion")
+			}
 		}
 	}
 

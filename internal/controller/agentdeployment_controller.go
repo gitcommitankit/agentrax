@@ -559,8 +559,9 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 	}
 
 	// Synchronize MCP registration status.
+	var mcpRequeue time.Duration
 	if r.Registrar != nil {
-		r.reconcileMCPRegistration(ctx, latest)
+		mcpRequeue = r.reconcileMCPRegistration(ctx, latest)
 	}
 
 	// Only write status when something actually changed to avoid spurious API
@@ -574,6 +575,11 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 	// If still pending, requeue to check readiness again.
 	if latest.Status.Phase == agentraxv1alpha1.PhasePending {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// If MCP registration needs periodic heartbeats, requeue accordingly.
+	if mcpRequeue > 0 {
+		return ctrl.Result{RequeueAfter: mcpRequeue}, nil
 	}
 
 	logger.Info("reconciled AgentDeployment", "phase", latest.Status.Phase, "readyReplicas", latest.Status.CurrentReplicas)
@@ -608,25 +614,32 @@ func (r *AgentDeploymentReconciler) detectImagePullFailure(ctx context.Context, 
 // reconcileMCPRegistration synchronizes the MCP registry state with the AgentDeployment.
 // It registers when running and expose is true, heartbeats when already registered,
 // or deregisters when expose is false.
-func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) {
+// Returns a requeue duration if periodic heartbeats are needed.
+func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) time.Duration {
 	if r.Registrar == nil {
-		return
+		return 0
 	}
 
 	// If MCP exposure is disabled, ensure agent is deregistered.
 	if !ad.Spec.MCP.Expose {
 		if ad.Status.Registered {
-			_ = r.Registrar.Deregister(ctx, ad)
+			if err := r.Registrar.Deregister(ctx, ad); err != nil {
+				SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "DeregisterFailed", err.Error())
+				return 0
+			}
 			ad.Status.Registered = false
 		}
 		RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
-		return
+		return 0
 	}
 
 	// Only register or heartbeat if the deployment is in PhaseRunning.
 	if ad.Status.Phase != agentraxv1alpha1.PhaseRunning {
-		return
+		return 0
 	}
+
+	// Requeue interval shorter than TTL (90s) to ensure heartbeats occur before expiry.
+	requeueInterval := 60 * time.Second
 
 	// If already registered, perform heartbeat probe.
 	if ad.Status.Registered {
@@ -634,21 +647,22 @@ func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context
 			// After 3 strikes, Heartbeat deregisters the agent.
 			ad.Status.Registered = false
 			SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "HeartbeatFailed", err.Error())
-			return
+			return requeueInterval
 		}
 		RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
-		return
+		return requeueInterval
 	}
 
 	// Not registered yet — attempt initial registration handshake.
 	if err := r.Registrar.Register(ctx, ad); err != nil {
 		ad.Status.Registered = false
 		SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "HandshakeFailed", err.Error())
-		return
+		return requeueInterval
 	}
 
 	ad.Status.Registered = true
 	RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
+	return requeueInterval
 }
 
 // ── Desired-state builders ────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
@@ -127,14 +128,22 @@ func (r *Registrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 	if err != nil {
 		failCount := r.incrementFailures(ad.Namespace, ad.Name)
 		if failCount >= MaxConsecutiveHeartbeatFailures {
-			_ = r.Registry.Deregister(ctx, ad.Namespace, ad.Name)
+			deregErr := r.Registry.Deregister(ctx, ad.Namespace, ad.Name)
+			if deregErr != nil {
+				return fmt.Errorf("deregistered after %d consecutive heartbeat failures (latest error: %w); deregister error: %v", failCount, err, deregErr)
+			}
 			return fmt.Errorf("deregistered after %d consecutive heartbeat failures (latest error: %w)", failCount, err)
 		}
 		return fmt.Errorf("heartbeat probe failed (%d/%d): %w", failCount, MaxConsecutiveHeartbeatFailures, err)
 	}
 
 	r.resetFailures(ad.Namespace, ad.Name)
-	return r.Registry.Heartbeat(ctx, ad.Namespace, ad.Name)
+	hbErr := r.Registry.Heartbeat(ctx, ad.Namespace, ad.Name)
+	if hbErr != nil && strings.Contains(hbErr.Error(), "not found in registry") {
+		// Agent not found - attempt re-registration
+		return r.Register(ctx, ad)
+	}
+	return hbErr
 }
 
 func (r *Registrar) incrementFailures(namespace, name string) int {

@@ -31,14 +31,16 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -61,6 +63,39 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// registryServerRunnable runs the MCP registry HTTP server on every manager replica.
+type registryServerRunnable struct {
+	registryAddr string
+	mcpRegistry  *registry.Registry
+}
+
+func (r *registryServerRunnable) Start(ctx context.Context) error {
+	r.mcpRegistry.Start(ctx)
+	srv := &http.Server{
+		Addr:              r.registryAddr,
+		Handler:           r.mcpRegistry.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	setupLog.Info("starting MCP discovery registry server", "addr", r.registryAddr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func (r *registryServerRunnable) NeedLeaderElection() bool {
+	return false
+}
+
 // init registers all Kubernetes core, CRD, and monitoring schemes.
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -73,7 +108,7 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch,namespace=agentrax-system,resourceNames=agentrax-registry
 
 // main is the entrypoint for the Agentrax controller manager binary.
 func main() {
@@ -169,6 +204,12 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
+	// Determine registry namespace once for both manager cache and registry construction.
+	registryNamespace := os.Getenv("POD_NAMESPACE")
+	if registryNamespace == "" {
+		registryNamespace = "agentrax-system"
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -176,6 +217,15 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "ddf1aac5.agentrax.io",
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.ConfigMap{}: {
+					Namespaces: map[string]cache.Config{
+						registryNamespace: {},
+					},
+				},
+			},
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -215,26 +265,15 @@ func main() {
 	}
 
 	// Initialize MCP discovery registry and registrar.
-	mcpRegistry := registry.NewRegistry(mgr.GetClient(), "agentrax-system", registry.DefaultTTL)
+	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registry.DefaultTTL)
 	mcpRegistrar := registry.NewRegistrar(mcpRegistry, registry.NewHTTPMCPClient())
 
 	if registryAddr != "" && registryAddr != "0" {
-		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-			mcpRegistry.Start(ctx)
-			srv := &http.Server{
-				Addr:    registryAddr,
-				Handler: mcpRegistry.Handler(),
-			}
-			go func() {
-				<-ctx.Done()
-				_ = srv.Shutdown(context.Background())
-			}()
-			setupLog.Info("starting MCP discovery registry server", "addr", registryAddr)
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return err
-			}
-			return nil
-		})); err != nil {
+		registryRunnable := &registryServerRunnable{
+			registryAddr: registryAddr,
+			mcpRegistry:  mcpRegistry,
+		}
+		if err := mgr.Add(registryRunnable); err != nil {
 			setupLog.Error(err, "unable to add registry server to manager")
 			os.Exit(1)
 		}
@@ -247,9 +286,6 @@ func main() {
 		CanaryController: canaryController,
 		Registrar:        mcpRegistrar,
 	}
-	agentDeploymentReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
-		return mcpRegistrar.Deregister(ctx, ad)
-	})
 	if canaryController != nil {
 		canaryController.Registrar = mcpRegistrar
 	}

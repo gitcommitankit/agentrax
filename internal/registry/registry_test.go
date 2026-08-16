@@ -86,6 +86,66 @@ func TestRegistry_CRUD(t *testing.T) {
 	}
 }
 
+func TestRegistry_RegisterIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	reg := NewRegistry(nil, "agentrax-system", 10*time.Second)
+
+	// 1. First registration
+	err := reg.Register(ctx, Entry{
+		Namespace: "tenant-a",
+		Name:      "agent-idem",
+		Endpoint:  "http://agent-idem.tenant-a.svc:8080",
+		Tools:     []string{"search"},
+	})
+	if err != nil {
+		t.Fatalf("first Register failed: %v", err)
+	}
+
+	entry1, ok := reg.Get("tenant-a", "agent-idem")
+	if !ok || entry1 == nil {
+		t.Fatalf("expected agent-idem to be found after first registration")
+	}
+	firstRegisteredAt := entry1.RegisteredAt
+	firstHeartbeatAt := entry1.HeartbeatAt
+
+	// Wait a moment to ensure timestamps would differ
+	time.Sleep(10 * time.Millisecond)
+
+	// 2. Second registration (idempotent)
+	err = reg.Register(ctx, Entry{
+		Namespace: "tenant-a",
+		Name:      "agent-idem",
+		Endpoint:  "http://agent-idem.tenant-a.svc:8080",
+		Tools:     []string{"search", "calculator"},
+	})
+	if err != nil {
+		t.Fatalf("second Register failed: %v", err)
+	}
+
+	// 3. Verify only one entry exists
+	list := reg.List()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 agent in list after idempotent register, got %d", len(list))
+	}
+
+	// 4. Verify RegisteredAt is preserved, HeartbeatAt is refreshed
+	entry2, ok := reg.Get("tenant-a", "agent-idem")
+	if !ok || entry2 == nil {
+		t.Fatalf("expected agent-idem to be found after second registration")
+	}
+	if !entry2.RegisteredAt.Equal(firstRegisteredAt) {
+		t.Errorf("RegisteredAt changed: was %v, now %v", firstRegisteredAt, entry2.RegisteredAt)
+	}
+	if !entry2.HeartbeatAt.After(firstHeartbeatAt) {
+		t.Errorf("HeartbeatAt not refreshed: was %v, now %v", firstHeartbeatAt, entry2.HeartbeatAt)
+	}
+
+	// 5. Verify tools updated
+	if len(entry2.Tools) != 2 {
+		t.Errorf("expected 2 tools after second registration, got %d", len(entry2.Tools))
+	}
+}
+
 func TestRegistry_TTLSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -159,7 +219,8 @@ func TestRegistry_Heartbeat(t *testing.T) {
 }
 
 func TestRegistry_ConfigMapPersistence(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 

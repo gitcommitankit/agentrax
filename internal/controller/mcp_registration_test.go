@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -304,6 +305,17 @@ var _ = Describe("MCP Registration Integration", func() {
 			g.Expect(fetched.Status.Registered).To(BeTrue())
 		}, timeout, interval).Should(Succeed())
 
+		// Install a Deregister hook that verifies Service still exists.
+		var serviceExistedDuringDeregister bool
+		testReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+			svc := &corev1.Service{}
+			svcKey := types.NamespacedName{Name: adName, Namespace: ns}
+			err := k8sClient.Get(ctx, svcKey, svc)
+			serviceExistedDuringDeregister = (err == nil)
+			return testRegistrar.Deregister(ctx, ad)
+		})
+		defer testReconciler.SetDeregister(nil)
+
 		// Delete the AgentDeployment
 		fetched := &agentraxv1alpha1.AgentDeployment{}
 		Expect(k8sClient.Get(ctx, adKey, fetched)).To(Succeed())
@@ -314,6 +326,9 @@ var _ = Describe("MCP Registration Integration", func() {
 			err := k8sClient.Get(ctx, adKey, &agentraxv1alpha1.AgentDeployment{})
 			return apierrors.IsNotFound(err)
 		}, timeout, interval).Should(BeTrue())
+
+		// Verify deregistration occurred while Service was present
+		Expect(serviceExistedDuringDeregister).To(BeTrue(), "Service should exist during deregistration")
 
 		// Entry must be gone from registry
 		_, ok := testRegistry.Get(ns, adName)

@@ -1,9 +1,10 @@
 resources:
 - manager.yaml
 - registry_service.yaml
+- registry_networkpolicy.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
   newName: controller
-  newTag: latest
+  newTag: v0.1.0
