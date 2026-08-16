@@ -64,12 +64,14 @@ type mcpInitializeRequest struct {
 	Params  mcpInitializeParams `json:"params"`
 }
 
+// mcpInitializeParams encapsulates the parameters passed to the MCP initialize RPC.
 type mcpInitializeParams struct {
 	ProtocolVersion string                 `json:"protocolVersion"`
 	ClientInfo      mcpClientInfo          `json:"clientInfo"`
 	Capabilities    map[string]interface{} `json:"capabilities"`
 }
 
+// mcpClientInfo identifies the client implementation and version to the MCP server.
 type mcpClientInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
@@ -83,11 +85,13 @@ type mcpInitializeResponse struct {
 	Error   *mcpError            `json:"error,omitempty"`
 }
 
+// mcpError represents a JSON-RPC 2.0 error object.
 type mcpError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
+// mcpInitializeResult encapsulates the capability and tool declarations returned by an MCP server.
 type mcpInitializeResult struct {
 	ProtocolVersion string              `json:"protocolVersion"`
 	Capabilities    mcpCapabilities     `json:"capabilities"`
@@ -95,15 +99,18 @@ type mcpInitializeResult struct {
 	Tools           []mcpToolDefinition `json:"tools,omitempty"`
 }
 
+// mcpCapabilities declares server-supported features such as tools or resources.
 type mcpCapabilities struct {
 	Tools *mcpToolsCapability `json:"tools,omitempty"`
 }
 
+// mcpToolsCapability specifies tool availability and listing support.
 type mcpToolsCapability struct {
 	Available []string `json:"available,omitempty"`
 	List      bool     `json:"list,omitempty"`
 }
 
+// mcpToolDefinition describes an individual tool declared in the initialize result.
 type mcpToolDefinition struct {
 	Name string `json:"name"`
 }

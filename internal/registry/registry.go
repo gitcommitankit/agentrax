@@ -375,6 +375,7 @@ func (r *Registry) Handler() http.Handler {
 	return mux
 }
 
+// handleRegister handles HTTP POST requests to register or update an agent entry.
 func (r *Registry) handleRegister(w http.ResponseWriter, req *http.Request) {
 	var entry Entry
 	if err := json.NewDecoder(req.Body).Decode(&entry); err != nil {
@@ -391,6 +392,7 @@ func (r *Registry) handleRegister(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 }
 
+// handleDeregisterAgentPath handles HTTP DELETE requests targeting /agents/{namespace}/{name}.
 func (r *Registry) handleDeregisterAgentPath(w http.ResponseWriter, req *http.Request) {
 	namespace := req.PathValue("namespace")
 	name := req.PathValue("name")
@@ -409,6 +411,7 @@ func (r *Registry) handleDeregisterAgentPath(w http.ResponseWriter, req *http.Re
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deregistered"})
 }
 
+// handleDeregister handles legacy HTTP DELETE requests targeting /deregister.
 func (r *Registry) handleDeregister(w http.ResponseWriter, req *http.Request) {
 	namespace := req.URL.Query().Get("namespace")
 	name := req.URL.Query().Get("name")
@@ -439,6 +442,7 @@ func (r *Registry) handleDeregister(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deregistered"})
 }
 
+// handleListAgents handles HTTP GET requests to list all active, non-expired registered agents.
 func (r *Registry) handleListAgents(w http.ResponseWriter, req *http.Request) {
 	agents := r.List()
 	w.Header().Set("Content-Type", "application/json")
@@ -446,6 +450,7 @@ func (r *Registry) handleListAgents(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewEncoder(w).Encode(agents)
 }
 
+// handleGetAgent handles HTTP GET requests to fetch details of a specific agent.
 func (r *Registry) handleGetAgent(w http.ResponseWriter, req *http.Request) {
 	namespace := req.PathValue("namespace")
 	name := req.PathValue("name")

@@ -69,6 +69,7 @@ type registryServerRunnable struct {
 	mcpRegistry  *registry.Registry
 }
 
+// Start starts the MCP discovery HTTP server and listens until context cancellation.
 func (r *registryServerRunnable) Start(ctx context.Context) error {
 	r.mcpRegistry.Start(ctx)
 	srv := &http.Server{
@@ -92,6 +93,7 @@ func (r *registryServerRunnable) Start(ctx context.Context) error {
 	return nil
 }
 
+// NeedLeaderElection returns false so the registry server runs across all manager replicas.
 func (r *registryServerRunnable) NeedLeaderElection() bool {
 	return false
 }

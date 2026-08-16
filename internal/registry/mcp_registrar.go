@@ -152,6 +152,7 @@ func (r *Registrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 	return hbErr
 }
 
+// incrementFailures records a probe failure and returns the new consecutive failure count.
 func (r *Registrar) incrementFailures(namespace, name string) int {
 	r.failuresMu.Lock()
 	defer r.failuresMu.Unlock()
@@ -163,6 +164,7 @@ func (r *Registrar) incrementFailures(namespace, name string) int {
 	return r.failures[k]
 }
 
+// resetFailures clears the consecutive failure counter for the specified agent.
 func (r *Registrar) resetFailures(namespace, name string) {
 	r.failuresMu.Lock()
 	defer r.failuresMu.Unlock()
