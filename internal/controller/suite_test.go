@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/quota"
@@ -119,6 +120,8 @@ var _ = BeforeSuite(func() {
 	// Register apiextensions types so serviceMonitorCRDExists can decode CRD objects
 	// when called from SetupWithManager via the uncached API reader.
 	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// Register Gateway API types so HTTPRoute objects can be created in canary tests.
+	Expect(gatewayv1.Install(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 

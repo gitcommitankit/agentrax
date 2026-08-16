@@ -35,11 +35,21 @@ The canonical list of top-level end-to-end test scenarios. Do not add new top-le
 | Phase | Focus               |   Status    | Milestone                                                                                |
 | ----- | ------------------- | :---------: | ---------------------------------------------------------------------------------------- |
 | 0     | Scaffolding         |  **Done**   | `make install` applies CRDs; `make run` starts both controllers                          |
-| 1     | Core reconciliation | **Up Next** | `AgentDeployment` → Deployment/Service/ServiceMonitor; status/conditions; finalizer stub |
-| 2     | Multi-tenancy       |   Pending   | `TenantQuota`, validating + mutating webhook, quota enforcement                          |
-| 3     | Autoscaling         |   Pending   | Prometheus Adapter integration, managed HPA                                              |
-| 4     | Canary rollout      |   Pending   | Rollout state machine, Gateway API traffic shifting, PromQL threshold evaluation         |
+| 1     | Core reconciliation |  **Done**   | `AgentDeployment` → Deployment/Service/ServiceMonitor; status/conditions; finalizer stub |
+| 2     | Multi-tenancy       |  **Done**   | `TenantQuota`, validating + mutating webhook, quota enforcement                          |
+| 3     | Autoscaling         |  **Done**   | Prometheus Adapter integration, managed HPA                                              |
+| 4     | Canary rollout      |  **Done**   | Rollout state machine, Gateway API traffic shifting, PromQL threshold evaluation         |
 | 5     | MCP registry        |   Pending   | Registrar, registry HTTP handler, discovery API                                          |
 | 6     | Hardening & demo    |   Pending   | E2e tests in CI, Helm chart, README, recorded demo                                       |
 
 Phases 2, 3, and 5 are independent of each other and can run in parallel once Phase 1 is complete. Phase 4 depends on both 2 and 3.
+
+### Phase 4 — Canary Rollout (§6)
+
+The canary controller (`internal/rollout.Controller`) is a pure helper driven by the `AgentDeploymentReconciler` each reconcile cycle. When `spec.rollout.strategy: Canary` and `spec.image` differs from `status.stableVersion`, the reconciler transitions to `RolloutInProgress` and calls `Step()` on every subsequent reconcile.
+
+**State machine**: `setWeight` steps create the canary Deployment and upsert a Gateway API `HTTPRoute` with the target weight split. `pause` steps query Prometheus for request count (sample gate), error rate, and p99 latency via `internal/metrics.Client`. If Prometheus is unreachable for longer than a fixed 60-second timeout, a fail-safe rollback fires. Sample-size gating extends the pause window up to the lesser of `3×pause_duration` or an absolute 15-minute maximum before forcing evaluation. Promotion updates the stable Deployment image and restores the HPA; rollback reverts everything and sets `phase=RolloutFailed`.
+
+**New operator flags**: `--prometheus-url` (required for Canary), `--gateway-name`, `--gateway-namespace`.
+
+**New status fields**: `canaryStepIndex`, `pauseStartedAt`, `promUnreachableSince` — all persisted so the state machine is re-entrant across operator restarts.

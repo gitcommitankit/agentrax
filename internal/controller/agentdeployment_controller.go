@@ -36,11 +36,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/go-logr/logr"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/rollout"
 	"github.com/gitcommitankit/agentrax/internal/scaling"
 )
 
@@ -74,6 +77,11 @@ type AgentDeploymentReconciler struct {
 	// (e.g. "nvidia.com/gpu"). Injected from the --gpu-resource-name operator flag.
 	// Used when computing quota headroom for HPA max-replicas capping.
 	GPUResourceName string
+
+	// CanaryController drives the canary rollout state machine. When nil (i.e.,
+	// --prometheus-url was not supplied), canary strategy is unavailable and
+	// AgentDeployments that request it are treated as Recreate.
+	CanaryController *rollout.Controller
 
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
@@ -109,6 +117,7 @@ func (r *AgentDeploymentReconciler) SetDeregister(fn func(ctx context.Context, a
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agentrax.io,resources=tenantquotas,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives the AgentDeployment's observed state toward its declared spec.
 // It creates and self-heals a Deployment, Service, and (when Prometheus Operator is present)
@@ -152,22 +161,51 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Reconcile child Deployment.
+	// 3. Handle canary rollout lifecycle before reconciling stable Deployment.
+	// During rollout, the stable Deployment image must remain at status.stableVersion,
+	// not spec.image. Canary handling determines which image to use for stable resources.
+	if r.CanaryController != nil {
+		// Manual abort: spec.rollout.abort=true triggers immediate rollback.
+		if isAbortRequested(ad) {
+			if err := r.CanaryController.Rollback(ctx, ad, "ManualAbort", "spec.rollout.abort was set to true"); err != nil {
+				return ctrl.Result{}, fmt.Errorf("aborting canary: %w", err)
+			}
+			return ctrl.Result{}, nil
+		}
+		// Active rollout: step the state machine and return — HPA and status
+		// updates are owned by the canary controller during rollout.
+		if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress {
+			result, err := r.CanaryController.Step(ctx, ad)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("stepping canary: %w", err)
+			}
+			return result, nil
+		}
+		// New canary: image changed while strategy is Canary.
+		if isCanaryTriggered(ad) {
+			if err := r.startCanary(ctx, ad); err != nil {
+				return ctrl.Result{}, fmt.Errorf("starting canary: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	}
+
+	// 4. Reconcile child Deployment.
 	if err := r.reconcileDeployment(ctx, ad); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
 
-	// 4. Reconcile child Service.
+	// 5. Reconcile child Service.
 	if err := r.reconcileService(ctx, ad); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
 	}
 
-	// 5. Reconcile ServiceMonitor when Prometheus Operator is present.
+	// 6. Reconcile ServiceMonitor when Prometheus Operator is present.
 	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
 	}
 
-	// 6. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
+	// 7. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
 	// reconcileHPA also returns the quota evaluation state so updateStatus can
 	// write the correct QuotaLimited condition onto the freshly re-fetched object.
 	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
@@ -175,7 +213,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
 	}
 
-	// 7. Derive status from the live Deployment and update it — always last.
+	// 8. Derive status from the live Deployment and update it — always last.
 	// We continue into updateStatus even when hpaResult requests a requeue so
 	// that the QuotaLimited condition is written in the same reconcile cycle.
 	// Return the shorter of the two requeue intervals.
@@ -488,7 +526,14 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 			dep.Status.AvailableReplicas == replicas
 
 		if rolloutComplete {
-			latest.Status.Phase = agentraxv1alpha1.PhaseRunning
+			// If a rollout failed, preserve PhaseRolloutFailed until the user changes spec.image or reverts to stable.
+			if latest.Status.Phase == agentraxv1alpha1.PhaseRolloutFailed && latest.Spec.Image != latest.Status.StableVersion {
+				// Retain PhaseRolloutFailed while spec.image is not the stable version.
+			} else {
+				latest.Status.Phase = agentraxv1alpha1.PhaseRunning
+				latest.Status.CanaryVersion = ""
+				apimeta.RemoveStatusCondition(&latest.Status.Conditions, "RolloutFailed")
+			}
 			// Derive StableVersion from the image the Deployment controller
 			// applied — not from latest.Spec.Image — so it reflects what is
 			// actually running, even if the spec was updated again since.
@@ -549,15 +594,19 @@ func (r *AgentDeploymentReconciler) detectImagePullFailure(ctx context.Context, 
 // ── Desired-state builders ────────────────────────────────────────────────────
 
 // agentLabels returns the canonical label set applied to all resources owned by ad.
+// For stable resources (Deployment, Service), this includes variant=stable.
 func agentLabels(ad *agentraxv1alpha1.AgentDeployment) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       ad.Name,
 		"app.kubernetes.io/managed-by": "agentrax",
 		"agentrax.io/tenant":           ad.Spec.TenantRef,
+		"agentrax.io/variant":          "stable",
 	}
 }
 
 // desiredDeployment builds the Deployment spec the reconciler wants to exist.
+// During a canary rollout (PhaseRolloutInProgress), the stable Deployment image
+// is frozen at status.stableVersion; otherwise it tracks spec.image.
 func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.AgentDeployment) *appsv1.Deployment {
 	port := ad.Spec.Port
 	if port == 0 {
@@ -566,6 +615,12 @@ func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.Agent
 
 	labels := agentLabels(ad)
 	replicas := ad.Spec.Replicas.Min
+
+	// During rollout, freeze the stable Deployment at status.stableVersion.
+	image := ad.Spec.Image
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress && ad.Status.StableVersion != "" {
+		image = ad.Status.StableVersion
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -588,7 +643,7 @@ func (r *AgentDeploymentReconciler) desiredDeployment(ad *agentraxv1alpha1.Agent
 							// Use a fixed container name that is always DNS-1035 compliant.
 							// The AgentDeployment name is used at the object level, not container level.
 							Name:  "agent",
-							Image: ad.Spec.Image,
+							Image: image,
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "agent",
@@ -656,12 +711,13 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 			Selector: metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-			// Carry the two labels used by the HPA ExternalMetric selector into
-			// every scraped sample. Prometheus will sanitize the dots to underscores
-			// during ingestion (app.kubernetes.io/name → app_kubernetes_io_name).
+			// Carry labels into every scraped sample. Prometheus will sanitize the dots
+			// to underscores during ingestion (app.kubernetes.io/name → app_kubernetes_io_name,
+			// agentrax.io/variant → agentrax_io_variant).
 			TargetLabels: []string{
 				"app.kubernetes.io/name",
 				"app.kubernetes.io/managed-by",
+				"agentrax.io/variant",
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
@@ -677,6 +733,8 @@ func (r *AgentDeploymentReconciler) desiredServiceMonitor(ad *agentraxv1alpha1.A
 // It uses an uncached API reader to check once whether the ServiceMonitor CRD is
 // installed, stores the result on the reconciler, and conditionally adds an
 // Owns watch for ServiceMonitor so that out-of-band deletions trigger a reconcile.
+// When CanaryController is non-nil it also watches HTTPRoute objects owned by this
+// controller so out-of-band HTTPRoute deletions trigger a reconcile.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Check CRD presence once at startup using the uncached reader so we don't
 	// require apiextensionsv1 to be registered in the caching informer scheme.
@@ -699,6 +757,79 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.hasServiceMonitorCRD {
 		bldr = bldr.Owns(&monitoringv1.ServiceMonitor{})
 	}
+	if r.CanaryController != nil {
+		// Watch HTTPRoutes owned by this controller so out-of-band deletions
+		// (e.g. manual kubectl delete) trigger a reconcile and self-heal.
+		bldr = bldr.Owns(&gatewayv1.HTTPRoute{})
+	}
 
 	return bldr.Complete(r)
+}
+
+// ── Canary helpers ────────────────────────────────────────────────────────────
+
+// isCanaryTriggered returns true when all conditions are met:
+//  1. spec.rollout.strategy == "Canary"
+//  2. status.stableVersion is set (at least one successful deploy has completed)
+//  3. spec.image differs from status.stableVersion
+//  4. status.phase is not already RolloutInProgress
+//  5. status.phase is not RolloutFailed for this exact image (prevents re-trigger loop)
+func isCanaryTriggered(ad *agentraxv1alpha1.AgentDeployment) bool {
+	if ad.Spec.Rollout.Strategy != "Canary" {
+		return false
+	}
+	if ad.Status.StableVersion == "" {
+		// No stable version yet — treat first deploy as Recreate.
+		return false
+	}
+	if ad.Spec.Image == ad.Status.StableVersion {
+		return false
+	}
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress {
+		return false
+	}
+	if ad.Status.Phase == agentraxv1alpha1.PhaseRolloutFailed && ad.Spec.Image == ad.Status.CanaryVersion {
+		// Do not retry the exact image that just failed or was aborted.
+		return false
+	}
+	return true
+}
+
+// isAbortRequested returns true when spec.rollout.abort is true and a canary
+// rollout is currently in progress. Abort outside of a rollout is ignored.
+func isAbortRequested(ad *agentraxv1alpha1.AgentDeployment) bool {
+	return ad.Spec.Rollout.Abort && ad.Status.Phase == agentraxv1alpha1.PhaseRolloutInProgress
+}
+
+// startCanary transitions an AgentDeployment from its current phase into
+// RolloutInProgress. It records the new canary version in status, resets step
+// tracking fields, and pauses the stable HPA so Phase 4 owns replica counts.
+func (r *AgentDeploymentReconciler) startCanary(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	logger := log.FromContext(ctx).WithValues(
+		"name", ad.Name, "namespace", ad.Namespace,
+		"newImage", ad.Spec.Image, "stableImage", ad.Status.StableVersion,
+	)
+	logger.Info("starting canary rollout")
+
+	// 1. Pause the stable HPA so the canary controller owns replica counts.
+	if err := r.CanaryController.PauseHPA(ctx, ad); err != nil {
+		return fmt.Errorf("pausing HPA before canary: %w", err)
+	}
+
+	// 2. Record canary state in status.
+	latest := &agentraxv1alpha1.AgentDeployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}, latest); err != nil {
+		return fmt.Errorf("re-fetching AD to start canary: %w", err)
+	}
+	latest.Status.Phase = agentraxv1alpha1.PhaseRolloutInProgress
+	latest.Status.CanaryVersion = ad.Spec.Image
+	latest.Status.CanaryStepIndex = 0
+	latest.Status.CanaryWeight = 0
+	latest.Status.PauseStartedAt = nil
+	latest.Status.PromUnreachableSince = nil
+	if err := r.Status().Update(ctx, latest); err != nil {
+		return fmt.Errorf("updating status to RolloutInProgress: %w", err)
+	}
+
+	return nil
 }

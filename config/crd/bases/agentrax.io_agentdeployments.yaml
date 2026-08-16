@@ -377,6 +377,11 @@ spec:
           status:
             description: AgentDeploymentStatus defines the observed state of an AgentDeployment.
             properties:
+              canaryStepIndex:
+                description: |-
+                  CanaryStepIndex is the index of the currently executing rollout step.
+                  Persisted so the state machine survives operator restarts.
+                type: integer
               canaryVersion:
                 description: CanaryVersion is the container image tag of the canary
                   deployment, if one is in progress.
@@ -447,6 +452,12 @@ spec:
                 description: CurrentReplicas is the number of replicas currently running.
                 format: int32
                 type: integer
+              pauseStartedAt:
+                description: |-
+                  PauseStartedAt records when the current pause step began.
+                  Used to enforce maximum pause extensions and the fail-safe rollback timeout.
+                format: date-time
+                type: string
               phase:
                 description: Phase is the high-level lifecycle phase of this deployment.
                 enum:
@@ -455,6 +466,12 @@ spec:
                 - RolloutInProgress
                 - RolloutFailed
                 - Degraded
+                type: string
+              promUnreachableSince:
+                description: |-
+                  PromUnreachableSince records when Prometheus last became unreachable.
+                  When non-nil and age exceeds FailSafeTimeout, a fail-safe rollback fires.
+                format: date-time
                 type: string
               registered:
                 description: Registered is true when this agent is currently registered
