@@ -108,7 +108,7 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch,namespace=agentrax-system,resourceNames=agentrax-registry
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 // main is the entrypoint for the Agentrax controller manager binary.
 func main() {

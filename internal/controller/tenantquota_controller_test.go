@@ -26,6 +26,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 )
@@ -55,10 +57,14 @@ var _ = Describe("TenantQuota Controller", func() {
 		for i := range adList.Items {
 			ad := &adList.Items[i]
 			// Remove finalizer so deletion is not blocked by the controller.
-			ad.Finalizers = nil
-			if err := k8sClient.Update(ctx, ad); err != nil && !apierrors.IsNotFound(err) {
-				Expect(err).NotTo(HaveOccurred(), "removing finalizer from AD %s", ad.Name)
-			}
+			_ = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, namespacedName(ad.Name, tqNS), latest); err != nil {
+					return client.IgnoreNotFound(err)
+				}
+				latest.Finalizers = nil
+				return k8sClient.Update(ctx, latest)
+			})
 			if err := k8sClient.Delete(ctx, ad); err != nil && !apierrors.IsNotFound(err) {
 				Expect(err).NotTo(HaveOccurred(), "deleting AD %s", ad.Name)
 			}
