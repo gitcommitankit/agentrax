@@ -170,7 +170,6 @@ func TestCanAdmit_Create(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestEnforcer(t)
@@ -297,7 +296,6 @@ func TestCanAdmit_Update_GPUCeiling(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestEnforcer(t)
@@ -421,7 +419,6 @@ func TestCanAdmit_Update_CrossTenantMove(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestEnforcer(t)
@@ -505,7 +502,6 @@ func TestRelease_Concurrent(t *testing.T) {
 		{"10 concurrent releases", 10},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestEnforcer(t)
@@ -529,7 +525,6 @@ func TestRelease_Concurrent(t *testing.T) {
 			start := make(chan struct{})
 			var wg sync.WaitGroup
 			for _, k := range keys {
-				k := k
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -581,7 +576,6 @@ func TestAdmitAndReserve_AtomicRaceProtection(t *testing.T) {
 	// AdmitAndReserve, maximising the chance of a real concurrent execution.
 	start := make(chan struct{})
 	for _, key := range []string{"ns/ad-A", "ns/ad-B"} {
-		key := key
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -687,7 +681,6 @@ func TestIsOverQuota(t *testing.T) {
 		{"zero GPU quota with 0 used GPUs ok", makeQuota(3, 0, 10, 3), makeUsage(2, 0, 8), false, ""},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			over, msg := e.IsOverQuota(tc.quota, tc.usage)

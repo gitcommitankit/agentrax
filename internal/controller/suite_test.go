@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -30,6 +31,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,6 +47,7 @@ import (
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/quota"
+	"github.com/gitcommitankit/agentrax/internal/registry"
 	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -67,6 +70,41 @@ var testReconciler *AgentDeploymentReconciler
 // testEnforcer is the shared quota Enforcer used by the TenantQuota reconciler
 // and the validating webhook in integration tests.
 var testEnforcer *quota.Enforcer
+
+// testRegistry and testRegistrar are the shared MCP registry fixtures used in tests.
+var testRegistry *registry.Registry
+var testRegistrar *registry.Registrar
+var testMockMCP *testMockMCPClient
+
+type testMockMCPClient struct {
+	mu    sync.Mutex
+	tools []string
+	err   error
+}
+
+func (m *testMockMCPClient) Initialize(ctx context.Context, endpoint string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return nil, m.err
+	}
+	if len(m.tools) == 0 {
+		return []string{"default_tool"}, nil
+	}
+	return m.tools, nil
+}
+
+func (m *testMockMCPClient) SetError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.err = err
+}
+
+func (m *testMockMCPClient) SetTools(tools []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tools = tools
+}
 
 // TestControllers is the Ginkgo test suite runner for controller integration tests.
 func TestControllers(t *testing.T) {
@@ -129,6 +167,14 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
+	// Ensure system namespace exists for registry ConfigMap
+	systemNamespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "agentrax-system",
+		},
+	}
+	_ = k8sClient.Create(ctx, systemNamespace)
+
 	// Start the controller manager so the reconciler runs during integration tests.
 	// Use envtest's webhook host/port so the manager's webhook server binds to the
 	// same address the webhook install options configured the API server to call.
@@ -146,11 +192,19 @@ var _ = BeforeSuite(func() {
 
 	testEnforcer = quota.NewEnforcer(quota.DefaultGPUResourceName)
 
+	testRegistry = registry.NewRegistry(k8sClient, "agentrax-system", registry.DefaultTTL)
+	testMockMCP = &testMockMCPClient{}
+	testRegistrar = registry.NewRegistrar(testRegistry, testMockMCP)
+
 	testReconciler = &AgentDeploymentReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		GPUResourceName: quota.DefaultGPUResourceName,
+		Registrar:       testRegistrar,
 	}
+	testReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+		return testRegistrar.Deregister(ctx, ad)
+	})
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&TenantQuotaReconciler{

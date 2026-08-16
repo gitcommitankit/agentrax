@@ -43,6 +43,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/rollout"
 	"github.com/gitcommitankit/agentrax/internal/scaling"
 )
@@ -82,6 +83,10 @@ type AgentDeploymentReconciler struct {
 	// --prometheus-url was not supplied), canary strategy is unavailable and
 	// AgentDeployments that request it are treated as Recreate.
 	CanaryController *rollout.Controller
+
+	// Registrar manages registration and discovery of this agent in the MCP registry.
+	// When nil, MCP registration features are disabled.
+	Registrar *registry.Registrar
 
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
@@ -247,6 +252,10 @@ func (r *AgentDeploymentReconciler) runDeletionCleanup(ctx context.Context, ad *
 
 	if deregister != nil {
 		if err := deregister(ctx, ad); err != nil {
+			return fmt.Errorf("deregistering agent: %w", err)
+		}
+	} else if r.Registrar != nil {
+		if err := r.Registrar.Deregister(ctx, ad); err != nil {
 			return fmt.Errorf("deregistering agent: %w", err)
 		}
 	}
@@ -549,6 +558,11 @@ func (r *AgentDeploymentReconciler) updateStatus(ctx context.Context, ad *agentr
 		}
 	}
 
+	// Synchronize MCP registration status.
+	if r.Registrar != nil {
+		r.reconcileMCPRegistration(ctx, latest)
+	}
+
 	// Only write status when something actually changed to avoid spurious API
 	// calls and watch events on every reconcile.
 	if !equality.Semantic.DeepEqual(prevStatus, &latest.Status) {
@@ -589,6 +603,52 @@ func (r *AgentDeploymentReconciler) detectImagePullFailure(ctx context.Context, 
 		}
 	}
 	return false, "", nil
+}
+
+// reconcileMCPRegistration synchronizes the MCP registry state with the AgentDeployment.
+// It registers when running and expose is true, heartbeats when already registered,
+// or deregisters when expose is false.
+func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) {
+	if r.Registrar == nil {
+		return
+	}
+
+	// If MCP exposure is disabled, ensure agent is deregistered.
+	if !ad.Spec.MCP.Expose {
+		if ad.Status.Registered {
+			_ = r.Registrar.Deregister(ctx, ad)
+			ad.Status.Registered = false
+		}
+		RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
+		return
+	}
+
+	// Only register or heartbeat if the deployment is in PhaseRunning.
+	if ad.Status.Phase != agentraxv1alpha1.PhaseRunning {
+		return
+	}
+
+	// If already registered, perform heartbeat probe.
+	if ad.Status.Registered {
+		if err := r.Registrar.Heartbeat(ctx, ad); err != nil {
+			// After 3 strikes, Heartbeat deregisters the agent.
+			ad.Status.Registered = false
+			SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "HeartbeatFailed", err.Error())
+			return
+		}
+		RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
+		return
+	}
+
+	// Not registered yet — attempt initial registration handshake.
+	if err := r.Registrar.Register(ctx, ad); err != nil {
+		ad.Status.Registered = false
+		SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "HandshakeFailed", err.Error())
+		return
+	}
+
+	ad.Status.Registered = true
+	RemoveCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed)
 }
 
 // ── Desired-state builders ────────────────────────────────────────────────────

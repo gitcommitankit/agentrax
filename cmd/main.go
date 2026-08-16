@@ -18,8 +18,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"time"
 
@@ -35,6 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -46,6 +50,7 @@ import (
 	"github.com/gitcommitankit/agentrax/internal/controller"
 	"github.com/gitcommitankit/agentrax/internal/metrics"
 	"github.com/gitcommitankit/agentrax/internal/quota"
+	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/rollout"
 	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
@@ -68,6 +73,8 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+
 // main is the entrypoint for the Agentrax controller manager binary.
 func main() {
 	var metricsAddr string
@@ -79,6 +86,7 @@ func main() {
 	var prometheusURL string
 	var gatewayName string
 	var gatewayNamespace string
+	var registryAddr string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -99,6 +107,8 @@ func main() {
 		"Name of the Gateway API Gateway object used for canary traffic splitting.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "agentrax-system",
 		"Namespace of the Gateway API Gateway object used for canary traffic splitting.")
+	flag.StringVar(&registryAddr, "registry-bind-address", ":9090",
+		"The address the MCP discovery registry HTTP endpoint binds to.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -204,12 +214,47 @@ func main() {
 		setupLog.Info("canary rollout disabled (no --prometheus-url)")
 	}
 
-	if err = (&controller.AgentDeploymentReconciler{
+	// Initialize MCP discovery registry and registrar.
+	mcpRegistry := registry.NewRegistry(mgr.GetClient(), "agentrax-system", registry.DefaultTTL)
+	mcpRegistrar := registry.NewRegistrar(mcpRegistry, registry.NewHTTPMCPClient())
+
+	if registryAddr != "" && registryAddr != "0" {
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			mcpRegistry.Start(ctx)
+			srv := &http.Server{
+				Addr:    registryAddr,
+				Handler: mcpRegistry.Handler(),
+			}
+			go func() {
+				<-ctx.Done()
+				_ = srv.Shutdown(context.Background())
+			}()
+			setupLog.Info("starting MCP discovery registry server", "addr", registryAddr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		})); err != nil {
+			setupLog.Error(err, "unable to add registry server to manager")
+			os.Exit(1)
+		}
+	}
+
+	agentDeploymentReconciler := &controller.AgentDeploymentReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		GPUResourceName:  gpuResourceName,
 		CanaryController: canaryController,
-	}).SetupWithManager(mgr); err != nil {
+		Registrar:        mcpRegistrar,
+	}
+	agentDeploymentReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+		return mcpRegistrar.Deregister(ctx, ad)
+	})
+	if canaryController != nil {
+		canaryController.Registrar = mcpRegistrar
+	}
+
+	if err = agentDeploymentReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 		os.Exit(1)
 	}
