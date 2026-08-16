@@ -1,0 +1,1124 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+    control-plane: controller-manager
+  name: agentrax-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: agentdeployments.agentrax.io
+spec:
+  group: agentrax.io
+  names:
+    kind: AgentDeployment
+    listKind: AgentDeploymentList
+    plural: agentdeployments
+    singular: agentdeployment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.currentReplicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.stableVersion
+      name: Stable
+      type: string
+    - jsonPath: .status.registered
+      name: Registered
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentDeployment is the Schema for the agentdeployments API.
+          It manages the full lifecycle of a model or autonomous agent workload on Kubernetes,
+          including autoscaling, canary rollout, and MCP-based service discovery.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AgentDeploymentSpec defines the desired state of an AgentDeployment.
+            properties:
+              args:
+                description: Args overrides the container entrypoint arguments.
+                items:
+                  type: string
+                type: array
+              env:
+                description: Env allows passing environment variables to the agent
+                  container.
+                items:
+                  description: EnvVar represents an environment variable present in
+                    a Container.
+                  properties:
+                    name:
+                      description: Name of the environment variable. Must be a C_IDENTIFIER.
+                      type: string
+                    value:
+                      description: |-
+                        Variable references $(VAR_NAME) are expanded
+                        using the previously defined environment variables in the container and
+                        any service environment variables. If a variable cannot be resolved,
+                        the reference in the input string will be unchanged. Double $$ are reduced
+                        to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                        "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                        Escaped references will never be expanded, regardless of whether the variable
+                        exists or not.
+                        Defaults to "".
+                      type: string
+                    valueFrom:
+                      description: Source for the environment variable's value. Cannot
+                        be used if value is not empty.
+                      properties:
+                        configMapKeyRef:
+                          description: Selects a key of a ConfigMap.
+                          properties:
+                            key:
+                              description: The key to select.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap or its key
+                                must be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        fieldRef:
+                          description: |-
+                            Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                            spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                          properties:
+                            apiVersion:
+                              description: Version of the schema the FieldPath is
+                                written in terms of, defaults to "v1".
+                              type: string
+                            fieldPath:
+                              description: Path of the field to select in the specified
+                                API version.
+                              type: string
+                          required:
+                          - fieldPath
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        resourceFieldRef:
+                          description: |-
+                            Selects a resource of the container: only resources limits and requests
+                            (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                          properties:
+                            containerName:
+                              description: 'Container name: required for volumes,
+                                optional for env vars'
+                              type: string
+                            divisor:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Specifies the output format of the exposed
+                                resources, defaults to "1"
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            resource:
+                              description: 'Required: resource to select'
+                              type: string
+                          required:
+                          - resource
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        secretKeyRef:
+                          description: Selects a key of a secret in the pod's namespace
+                          properties:
+                            key:
+                              description: The key of the secret to select from.  Must
+                                be a valid secret key.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret or its key must
+                                be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+              image:
+                description: Image is the container image serving the model or agent.
+                minLength: 1
+                type: string
+              mcp:
+                description: MCP controls whether this agent registers itself for
+                  MCP-based discovery.
+                properties:
+                  expose:
+                    description: Expose, when true, registers this agent in the MCP
+                      registry upon reaching a stable state.
+                    type: boolean
+                  tools:
+                    description: Tools is the list of tool names advertised by this
+                      agent in the MCP registry.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              port:
+                default: 8080
+                description: Port is the container port the model/agent listens on.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              replicas:
+                description: Replicas defines the autoscaling policy.
+                properties:
+                  max:
+                    description: Max is the maximum number of replicas. Must be at
+                      least 1.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  metric:
+                    description: Metric selects the custom metric used for autoscaling
+                      decisions.
+                    enum:
+                    - queueDepth
+                    - gpuUtilization
+                    type: string
+                  min:
+                    description: Min is the minimum number of replicas. Must be at
+                      least 1.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  target:
+                    description: Target is the desired value of the chosen metric
+                      per replica.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - max
+                - metric
+                - min
+                - target
+                type: object
+              resources:
+                description: Resources are passed through to the underlying pod template.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This is an alpha field and requires enabling the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              rollout:
+                description: Rollout defines how new versions are shipped. Optional;
+                  defaults to Recreate.
+                properties:
+                  abort:
+                    description: Abort, when set to true, triggers an immediate rollback
+                      of any in-progress canary.
+                    type: boolean
+                  rollback:
+                    description: |-
+                      Rollback defines the automatic rollback thresholds.
+                      Required when strategy is Canary.
+                    properties:
+                      maxErrorRate:
+                        description: MaxErrorRate is the maximum acceptable error
+                          rate, expressed as a percentage string (e.g. "2%").
+                        type: string
+                      maxP99LatencyMs:
+                        description: MaxP99LatencyMs is the maximum acceptable p99
+                          latency in milliseconds.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minRequestSample:
+                        description: |-
+                          MinRequestSample is the minimum number of requests that must be observed before
+                          threshold evaluation occurs. Guards against false positives at low traffic weight.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  steps:
+                    description: |-
+                      Steps lists the ordered canary traffic-shift and pause steps.
+                      Required when strategy is Canary.
+                    items:
+                      description: |-
+                        CanaryStep represents a single step in a canary rollout.
+                        Exactly one of SetWeight or Pause must be set per step.
+                      properties:
+                        pause:
+                          description: |-
+                            Pause is the duration to wait before evaluating rollback thresholds.
+                            Mutually exclusive with SetWeight.
+                          type: string
+                        setWeight:
+                          description: SetWeight is the percentage of traffic to send
+                            to the canary (0–100).
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                      type: object
+                    type: array
+                  strategy:
+                    default: Recreate
+                    description: Strategy determines the rollout approach. Defaults
+                      to Recreate.
+                    enum:
+                    - Recreate
+                    - Canary
+                    type: string
+                type: object
+              tenantRef:
+                description: TenantRef names the owning TenantQuota object in the
+                  same namespace.
+                minLength: 1
+                type: string
+            required:
+            - image
+            - replicas
+            - tenantRef
+            type: object
+          status:
+            description: AgentDeploymentStatus defines the observed state of an AgentDeployment.
+            properties:
+              canaryStepIndex:
+                description: |-
+                  CanaryStepIndex is the index of the currently executing rollout step.
+                  Persisted so the state machine survives operator restarts.
+                type: integer
+              canaryVersion:
+                description: CanaryVersion is the container image tag of the canary
+                  deployment, if one is in progress.
+                type: string
+              canaryWeight:
+                description: CanaryWeight is the current percentage of traffic routed
+                  to the canary (0–100).
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions holds the conditions for the AgentDeployment.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentReplicas:
+                description: CurrentReplicas is the number of replicas currently running.
+                format: int32
+                type: integer
+              pauseStartedAt:
+                description: |-
+                  PauseStartedAt records when the current pause step began.
+                  Used to enforce maximum pause extensions and the fail-safe rollback timeout.
+                format: date-time
+                type: string
+              phase:
+                description: Phase is the high-level lifecycle phase of this deployment.
+                enum:
+                - Pending
+                - Running
+                - RolloutInProgress
+                - RolloutFailed
+                - Degraded
+                type: string
+              promUnreachableSince:
+                description: |-
+                  PromUnreachableSince records when Prometheus last became unreachable.
+                  When non-nil and age exceeds FailSafeTimeout, a fail-safe rollback fires.
+                format: date-time
+                type: string
+              registered:
+                description: Registered is true when this agent is currently registered
+                  in the MCP registry.
+                type: boolean
+              stableVersion:
+                description: StableVersion is the container image tag of the currently
+                  stable deployment.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: tenantquotas.agentrax.io
+spec:
+  group: agentrax.io
+  names:
+    kind: TenantQuota
+    listKind: TenantQuotaList
+    plural: tenantquotas
+    singular: tenantquota
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.maxAgents
+      name: MaxAgents
+      type: integer
+    - jsonPath: .status.usedAgents
+      name: UsedAgents
+      type: integer
+    - jsonPath: .spec.maxGPUs
+      name: MaxGPUs
+      type: integer
+    - jsonPath: .status.usedGPUs
+      name: UsedGPUs
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TenantQuota is the Schema for the tenantquotas API.
+          It declares and enforces per-tenant resource ceilings for AgentDeployment objects.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TenantQuotaSpec defines resource ceilings for a tenant.
+            properties:
+              maxAgents:
+                description: MaxAgents is the maximum number of AgentDeployment objects
+                  allowed in this tenant.
+                format: int32
+                minimum: 1
+                type: integer
+              maxGPUs:
+                description: |-
+                  MaxGPUs is the total number of GPU units that can be allocated across all agents.
+                  GPU count is derived from spec.resources.limits["nvidia.com/gpu"] × spec.replicas.max.
+                format: int32
+                minimum: 0
+                type: integer
+              maxReplicasPerAgent:
+                description: MaxReplicasPerAgent is the maximum spec.replicas.max
+                  value any single agent may request.
+                format: int32
+                minimum: 1
+                type: integer
+              maxTotalReplicas:
+                description: MaxTotalReplicas is the ceiling on the sum of spec.replicas.max
+                  across all agents in this tenant.
+                format: int32
+                minimum: 1
+                type: integer
+            required:
+            - maxAgents
+            - maxGPUs
+            - maxReplicasPerAgent
+            - maxTotalReplicas
+            type: object
+          status:
+            description: TenantQuotaStatus reports current usage against the spec
+              ceilings.
+            properties:
+              conditions:
+                description: Conditions holds the conditions for the TenantQuota (e.g.
+                  OverQuota).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              usedAgents:
+                description: UsedAgents is the number of AgentDeployment objects currently
+                  in this tenant.
+                format: int32
+                type: integer
+              usedGPUs:
+                description: UsedGPUs is the total GPU units currently allocated across
+                  all agents in this tenant.
+                format: int32
+                type: integer
+              usedTotalReplicas:
+                description: UsedTotalReplicas is the sum of spec.replicas.max across
+                  all agents currently in this tenant.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-controller-manager
+  namespace: agentrax-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-leader-election-role
+  namespace: agentrax-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-agentdeployment-editor-role
+rules:
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-agentdeployment-viewer-role
+rules:
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - agentdeployments/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentrax-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentrax.io
+  resources:
+  - agentdeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentrax.io
+  resources:
+  - agentdeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - agentrax.io
+  resources:
+  - agentdeployments/status
+  - tenantquotas/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - agentrax.io
+  resources:
+  - tenantquotas
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentrax-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentrax-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-tenantquota-editor-role
+rules:
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - tenantquotas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - tenantquotas/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-tenantquota-viewer-role
+rules:
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - tenantquotas
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agentrax.agentrax.io
+  resources:
+  - tenantquotas/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-leader-election-rolebinding
+  namespace: agentrax-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentrax-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: agentrax-controller-manager
+  namespace: agentrax-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentrax-manager-role
+subjects:
+- kind: ServiceAccount
+  name: agentrax-controller-manager
+  namespace: agentrax-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentrax-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentrax-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: agentrax-controller-manager
+  namespace: agentrax-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: registry
+    app.kubernetes.io/name: agentrax
+  name: agentrax-agentrax-registry
+  namespace: agentrax-system
+spec:
+  ports:
+  - name: registry
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    control-plane: controller-manager
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+    control-plane: controller-manager
+  name: agentrax-controller-manager-metrics-service
+  namespace: agentrax-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+    control-plane: controller-manager
+  name: agentrax-controller-manager
+  namespace: agentrax-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        command:
+        - /manager
+        image: controller:latest
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: agentrax-controller-manager
+      terminationGracePeriodSeconds: 10

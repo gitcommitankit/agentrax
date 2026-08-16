@@ -307,7 +307,6 @@ var _ = Describe("Admission Webhook (integration)", func() {
 			start := make(chan struct{})
 			errs := make([]error, 2)
 			for i, name := range []string{"ad-race-a", "ad-race-b"} {
-				i, name := i, name
 				wg.Add(1)
 				go func() {
 					defer wg.Done()

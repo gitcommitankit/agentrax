@@ -40,6 +40,7 @@ import (
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/metrics"
+	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/scaling"
 )
 
@@ -70,6 +71,9 @@ type Controller struct {
 	Scheme *runtime.Scheme
 	// PromClient is the Prometheus query client used for threshold evaluation.
 	PromClient *metrics.Client
+	// Registrar manages registration in the MCP discovery registry.
+	// When non-nil, the canary controller triggers MCP re-registration after promotion.
+	Registrar *registry.Registrar
 	// GatewayName is the name of the Gateway API Gateway object.
 	GatewayName string
 	// GatewayNamespace is the namespace of the Gateway API Gateway object.
@@ -422,6 +426,19 @@ func (c *Controller) promote(ctx context.Context, ad *agentraxv1alpha1.AgentDepl
 
 	if err := c.Client.Status().Update(ctx, latest); err != nil {
 		return fmt.Errorf("updating status after promotion: %w", err)
+	}
+
+	// Trigger MCP re-registration with updated endpoint / image after promotion.
+	if c.Registrar != nil && latest.Spec.MCP.Expose {
+		if err := c.Registrar.Register(ctx, latest); err != nil {
+			logger.Error(err, "MCP re-registration after promotion failed; reconciler will retry on next cycle")
+		} else if !latest.Status.Registered {
+			// Registration succeeded but status not yet set - update it.
+			latest.Status.Registered = true
+			if err := c.Client.Status().Update(ctx, latest); err != nil {
+				logger.Error(err, "failed to update registration status after promotion")
+			}
+		}
 	}
 
 	logger.Info("canary promoted successfully", "stableVersion", promoted)

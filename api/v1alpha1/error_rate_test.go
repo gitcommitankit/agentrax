@@ -49,7 +49,6 @@ func TestParseErrorRate(t *testing.T) {
 		{" 5%", 0, true},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.input, func(t *testing.T) {
 			t.Parallel()
 			got, err := agentraxv1alpha1.ParseErrorRate(tc.input)

@@ -18,8 +18,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"time"
 
@@ -28,11 +31,14 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -46,6 +52,7 @@ import (
 	"github.com/gitcommitankit/agentrax/internal/controller"
 	"github.com/gitcommitankit/agentrax/internal/metrics"
 	"github.com/gitcommitankit/agentrax/internal/quota"
+	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/rollout"
 	agentraxwebhook "github.com/gitcommitankit/agentrax/internal/webhook"
 	// +kubebuilder:scaffold:imports
@@ -55,6 +62,41 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// registryServerRunnable runs the MCP registry HTTP server on every manager replica.
+type registryServerRunnable struct {
+	registryAddr string
+	mcpRegistry  *registry.Registry
+}
+
+// Start starts the MCP discovery HTTP server and listens until context cancellation.
+func (r *registryServerRunnable) Start(ctx context.Context) error {
+	r.mcpRegistry.Start(ctx)
+	srv := &http.Server{
+		Addr:              r.registryAddr,
+		Handler:           r.mcpRegistry.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	setupLog.Info("starting MCP discovery registry server", "addr", r.registryAddr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// NeedLeaderElection returns false so the registry server runs across all manager replicas.
+func (r *registryServerRunnable) NeedLeaderElection() bool {
+	return false
+}
 
 // init registers all Kubernetes core, CRD, and monitoring schemes.
 func init() {
@@ -68,6 +110,8 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+
 // main is the entrypoint for the Agentrax controller manager binary.
 func main() {
 	var metricsAddr string
@@ -79,6 +123,7 @@ func main() {
 	var prometheusURL string
 	var gatewayName string
 	var gatewayNamespace string
+	var registryAddr string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -99,6 +144,8 @@ func main() {
 		"Name of the Gateway API Gateway object used for canary traffic splitting.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "agentrax-system",
 		"Namespace of the Gateway API Gateway object used for canary traffic splitting.")
+	flag.StringVar(&registryAddr, "registry-bind-address", ":9090",
+		"The address the MCP discovery registry HTTP endpoint binds to.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -159,6 +206,12 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
+	// Determine registry namespace once for both manager cache and registry construction.
+	registryNamespace := os.Getenv("POD_NAMESPACE")
+	if registryNamespace == "" {
+		registryNamespace = "agentrax-system"
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -166,6 +219,15 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "ddf1aac5.agentrax.io",
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.ConfigMap{}: {
+					Namespaces: map[string]cache.Config{
+						registryNamespace: {},
+					},
+				},
+			},
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -204,12 +266,33 @@ func main() {
 		setupLog.Info("canary rollout disabled (no --prometheus-url)")
 	}
 
-	if err = (&controller.AgentDeploymentReconciler{
+	// Initialize MCP discovery registry and registrar.
+	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registry.DefaultTTL)
+	mcpRegistrar := registry.NewRegistrar(mcpRegistry, registry.NewHTTPMCPClient())
+
+	if registryAddr != "" && registryAddr != "0" {
+		registryRunnable := &registryServerRunnable{
+			registryAddr: registryAddr,
+			mcpRegistry:  mcpRegistry,
+		}
+		if err := mgr.Add(registryRunnable); err != nil {
+			setupLog.Error(err, "unable to add registry server to manager")
+			os.Exit(1)
+		}
+	}
+
+	agentDeploymentReconciler := &controller.AgentDeploymentReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		GPUResourceName:  gpuResourceName,
 		CanaryController: canaryController,
-	}).SetupWithManager(mgr); err != nil {
+		Registrar:        mcpRegistrar,
+	}
+	if canaryController != nil {
+		canaryController.Registrar = mcpRegistrar
+	}
+
+	if err = agentDeploymentReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 		os.Exit(1)
 	}

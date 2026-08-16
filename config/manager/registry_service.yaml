@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentrax-registry
+  namespace: system
+  labels:
+    app.kubernetes.io/name: agentrax
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    control-plane: controller-manager
+  ports:
+    - name: registry
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  type: ClusterIP
