@@ -429,6 +429,9 @@ func TestRegistrar_RegisterAndHeartbeat(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error on strike 1")
 	}
+	if errors.Is(err, ErrHeartbeatDeregistered) {
+		t.Errorf("strike 1 should not return ErrHeartbeatDeregistered")
+	}
 	if _, ok := reg.Get("tenant-x", "test-agent"); !ok {
 		t.Errorf("entry should still exist after 1 strike")
 	}
@@ -438,6 +441,9 @@ func TestRegistrar_RegisterAndHeartbeat(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error on strike 2")
 	}
+	if errors.Is(err, ErrHeartbeatDeregistered) {
+		t.Errorf("strike 2 should not return ErrHeartbeatDeregistered")
+	}
 	if _, ok := reg.Get("tenant-x", "test-agent"); !ok {
 		t.Errorf("entry should still exist after 2 strikes")
 	}
@@ -446,6 +452,9 @@ func TestRegistrar_RegisterAndHeartbeat(t *testing.T) {
 	err = registrar.Heartbeat(ctx, ad)
 	if err == nil {
 		t.Errorf("expected error on strike 3")
+	}
+	if !errors.Is(err, ErrHeartbeatDeregistered) {
+		t.Errorf("strike 3 should return ErrHeartbeatDeregistered, got %v", err)
 	}
 	if _, ok := reg.Get("tenant-x", "test-agent"); ok {
 		t.Errorf("entry should be removed after 3 consecutive failures")

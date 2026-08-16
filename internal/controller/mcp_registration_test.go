@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -306,12 +307,12 @@ var _ = Describe("MCP Registration Integration", func() {
 		}, timeout, interval).Should(Succeed())
 
 		// Install a Deregister hook that verifies Service still exists.
-		var serviceExistedDuringDeregister bool
+		var serviceExistedDuringDeregister atomic.Bool
 		testReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 			svc := &corev1.Service{}
 			svcKey := types.NamespacedName{Name: adName, Namespace: ns}
 			err := k8sClient.Get(ctx, svcKey, svc)
-			serviceExistedDuringDeregister = (err == nil)
+			serviceExistedDuringDeregister.Store(err == nil)
 			return testRegistrar.Deregister(ctx, ad)
 		})
 		defer testReconciler.SetDeregister(nil)
@@ -328,7 +329,7 @@ var _ = Describe("MCP Registration Integration", func() {
 		}, timeout, interval).Should(BeTrue())
 
 		// Verify deregistration occurred while Service was present
-		Expect(serviceExistedDuringDeregister).To(BeTrue(), "Service should exist during deregistration")
+		Expect(serviceExistedDuringDeregister.Load()).To(BeTrue(), "Service should exist during deregistration")
 
 		// Entry must be gone from registry
 		_, ok := testRegistry.Get(ns, adName)

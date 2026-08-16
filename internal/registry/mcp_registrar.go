@@ -18,6 +18,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -29,6 +30,9 @@ const (
 	// MaxConsecutiveHeartbeatFailures is the number of failed heartbeat probes before an agent is automatically deregistered.
 	MaxConsecutiveHeartbeatFailures = 3
 )
+
+// ErrHeartbeatDeregistered is returned when an agent is deregistered due to reaching MaxConsecutiveHeartbeatFailures.
+var ErrHeartbeatDeregistered = errors.New("deregistered after consecutive heartbeat failures")
 
 // Registrar coordinates MCP initialize handshakes and updates the discovery Registry.
 type Registrar struct {
@@ -130,9 +134,11 @@ func (r *Registrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 		if failCount >= MaxConsecutiveHeartbeatFailures {
 			deregErr := r.Registry.Deregister(ctx, ad.Namespace, ad.Name)
 			if deregErr != nil {
-				return fmt.Errorf("deregistered after %d consecutive heartbeat failures (latest error: %w); deregister error: %v", failCount, err, deregErr)
+				return fmt.Errorf("%w: deregistered after %d consecutive heartbeat failures (latest error: %w); deregister error: %v",
+					ErrHeartbeatDeregistered, failCount, err, deregErr)
 			}
-			return fmt.Errorf("deregistered after %d consecutive heartbeat failures (latest error: %w)", failCount, err)
+			return fmt.Errorf("%w: deregistered after %d consecutive heartbeat failures (latest error: %w)",
+				ErrHeartbeatDeregistered, failCount, err)
 		}
 		return fmt.Errorf("heartbeat probe failed (%d/%d): %w", failCount, MaxConsecutiveHeartbeatFailures, err)
 	}

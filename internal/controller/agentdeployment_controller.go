@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -625,7 +626,7 @@ func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context
 		if ad.Status.Registered {
 			if err := r.Registrar.Deregister(ctx, ad); err != nil {
 				SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "DeregisterFailed", err.Error())
-				return 0
+				return 5 * time.Second
 			}
 			ad.Status.Registered = false
 		}
@@ -644,8 +645,10 @@ func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context
 	// If already registered, perform heartbeat probe.
 	if ad.Status.Registered {
 		if err := r.Registrar.Heartbeat(ctx, ad); err != nil {
-			// After 3 strikes, Heartbeat deregisters the agent.
-			ad.Status.Registered = false
+			// Only mark unregistered if Heartbeat confirms deregistration (after 3 consecutive failures).
+			if errors.Is(err, registry.ErrHeartbeatDeregistered) {
+				ad.Status.Registered = false
+			}
 			SetCondition(ad, agentraxv1alpha1.ConditionMCPHandshakeFailed, metav1.ConditionTrue, "HeartbeatFailed", err.Error())
 			return requeueInterval
 		}
