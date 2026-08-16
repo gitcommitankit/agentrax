@@ -300,6 +300,29 @@ func TestEvaluate_InvalidMaxErrorRate(t *testing.T) {
 	}
 }
 
+// TestEvaluate_ZeroSample_AbsentSeries verifies that when Prometheus returns 0.0
+// (e.g. from `or vector(0)` on absent series), Evaluate cleanly flags SampleTooSmall
+// without failing or triggering a false breach.
+func TestEvaluate_ZeroSample_AbsentSeries(t *testing.T) {
+	srv := prometheusServer(t, []float64{0.0})
+	defer srv.Close()
+
+	ad := makeAD("agent", "ns", "1%", 200)
+	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error when series evaluate to 0: %v", err)
+	}
+	if !result.SampleTooSmall {
+		t.Errorf("expected SampleTooSmall=true when count is 0, got %v", result.SampleTooSmall)
+	}
+	if result.ThresholdBreached {
+		t.Errorf("expected ThresholdBreached=false when sample is 0, got %v", result.ThresholdBreached)
+	}
+	if result.SampleCount != 0 {
+		t.Errorf("expected SampleCount=0, got %f", result.SampleCount)
+	}
+}
+
 // ── promDuration helper ───────────────────────────────────────────────────────
 
 // TestPromDuration_Format verifies that promDuration formats durations correctly.

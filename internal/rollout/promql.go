@@ -38,7 +38,7 @@ import (
 //   - agentrax.io/variant=canary (propagated from pod labels via ServiceMonitor)
 func requestCountQuery(adName, namespace string, window time.Duration) string {
 	return fmt.Sprintf(
-		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s]))`,
+		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])) or vector(0)`,
 		namespace, adName, promDuration(window),
 	)
 }
@@ -49,9 +49,9 @@ func requestCountQuery(adName, namespace string, window time.Duration) string {
 func errorRateQuery(adName, namespace string, window time.Duration) string {
 	d := promDuration(window)
 	return fmt.Sprintf(
-		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary",code=~"5.."}[%s]))`+
+		`(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary",code=~"5.."}[%s])) or vector(0))`+
 			` / on() group_left `+
-			`clamp_min(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])), 1)`,
+			`clamp_min(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])) or vector(0), 1)`,
 		namespace, adName, d,
 		namespace, adName, d,
 	)
