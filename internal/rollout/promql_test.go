@@ -323,6 +323,33 @@ func TestEvaluate_ZeroSample_AbsentSeries(t *testing.T) {
 	}
 }
 
+// TestEvaluate_ZeroErrors_Absent5xxSeries verifies that when request count is sufficient
+// (>= minRequestSample) and 5xx series are absent (evaluating to 0.0 via `or vector(0)`),
+// Evaluate completes with ErrorRate=0.0, SampleTooSmall=false, and ThresholdBreached=false.
+func TestEvaluate_ZeroErrors_Absent5xxSeries(t *testing.T) {
+	// Sequence: count=200 (sufficient), errorRate=0.0 (0% errors / absent 5xx series), p99=80ms.
+	srv := prometheusServer(t, []float64{200.0, 0.0, 80.0})
+	defer srv.Close()
+
+	ad := makeAD("agent", "ns", "1%", 200)
+	result, err := Evaluate(context.Background(), metrics.NewClient(srv.URL), ad, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error when 5xx series is absent: %v", err)
+	}
+	if result.SampleTooSmall {
+		t.Errorf("expected SampleTooSmall=false when count is 200, got %v", result.SampleTooSmall)
+	}
+	if result.ThresholdBreached {
+		t.Errorf("expected ThresholdBreached=false when errorRate is 0.0, got %v (reason: %s)", result.ThresholdBreached, result.BreachReason)
+	}
+	if result.ErrorRate != 0.0 {
+		t.Errorf("expected ErrorRate=0.0, got %f", result.ErrorRate)
+	}
+	if result.SampleCount != 200.0 {
+		t.Errorf("expected SampleCount=200.0, got %f", result.SampleCount)
+	}
+}
+
 // ── promDuration helper ───────────────────────────────────────────────────────
 
 // TestPromDuration_Format verifies that promDuration formats durations correctly.
