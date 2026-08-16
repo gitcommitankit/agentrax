@@ -320,6 +320,14 @@ var _ = Describe("MCP Registration Integration", func() {
 		// Delete the AgentDeployment
 		fetched := &agentraxv1alpha1.AgentDeployment{}
 		Expect(k8sClient.Get(ctx, adKey, fetched)).To(Succeed())
+
+		// Verify child Service has controlling owner reference matching AgentDeployment UID
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: adName, Namespace: ns}, svc)).To(Succeed())
+		ownerRef := metav1.GetControllerOf(svc)
+		Expect(ownerRef).NotTo(BeNil())
+		Expect(ownerRef.UID).To(Equal(fetched.UID))
+
 		Expect(k8sClient.Delete(ctx, fetched)).To(Succeed())
 
 		// Wait for object to be completely removed

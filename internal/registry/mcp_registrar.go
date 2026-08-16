@@ -134,8 +134,8 @@ func (r *Registrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDep
 		if failCount >= MaxConsecutiveHeartbeatFailures {
 			deregErr := r.Registry.Deregister(ctx, ad.Namespace, ad.Name)
 			if deregErr != nil {
-				return fmt.Errorf("%w: deregistered after %d consecutive heartbeat failures (latest error: %w); deregister error: %v",
-					ErrHeartbeatDeregistered, failCount, err, deregErr)
+				return fmt.Errorf("failed to deregister after %d consecutive heartbeat failures: %w (latest probe error: %v)",
+					failCount, deregErr, err)
 			}
 			return fmt.Errorf("%w: deregistered after %d consecutive heartbeat failures (latest error: %w)",
 				ErrHeartbeatDeregistered, failCount, err)
