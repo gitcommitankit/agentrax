@@ -219,28 +219,34 @@ func main() {
 
 	registryTTL := registry.DefaultTTL
 	if v := os.Getenv("AGENTRAX_REGISTRY_TTL"); v != "" {
-		if parsed, err := time.ParseDuration(v); err == nil {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
 			registryTTL = parsed
 		} else {
-			setupLog.Error(err, "invalid AGENTRAX_REGISTRY_TTL, using default", "default", registry.DefaultTTL)
+			setupLog.Error(err, "invalid or non-positive AGENTRAX_REGISTRY_TTL, using default",
+				"default", registry.DefaultTTL)
 		}
 	}
 
 	mcpHealthInterval := 60 * time.Second
 	if v := os.Getenv("AGENTRAX_MCP_HEALTH_INTERVAL"); v != "" {
-		if parsed, err := time.ParseDuration(v); err == nil {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
 			mcpHealthInterval = parsed
 		} else {
-			setupLog.Error(err, "invalid AGENTRAX_MCP_HEALTH_INTERVAL, using default", "default", mcpHealthInterval)
+			setupLog.Error(err, "invalid or non-positive AGENTRAX_MCP_HEALTH_INTERVAL, using default",
+				"default", mcpHealthInterval)
 		}
 	}
 
 	if mcpHealthInterval >= registryTTL {
+		adjusted := registryTTL / 2
+		if adjusted <= 0 {
+			adjusted = time.Second
+		}
 		setupLog.Info("AGENTRAX_MCP_HEALTH_INTERVAL must be strictly less than AGENTRAX_REGISTRY_TTL",
 			"configuredInterval", mcpHealthInterval,
 			"registryTTL", registryTTL,
-			"adjustedInterval", registryTTL/2)
-		mcpHealthInterval = registryTTL / 2
+			"adjustedInterval", adjusted)
+		mcpHealthInterval = adjusted
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

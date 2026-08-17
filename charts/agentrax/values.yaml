@@ -94,9 +94,7 @@ registry:
     port: 9090
     # -- Registry Service type
     type: ClusterIP
-  # -- Bind address for the in-operator registry HTTP server
-  bindAddress: ":9090"
-  # -- Bind port for the registry HTTP server (referenced by container port and targetPort).
+  # -- Bind port for the registry HTTP server (used for container port, service targetPort, and manager bind address).
   bindPort: 9090
   # -- Registry entry TTL (e.g. "90s")
   ttl: "90s"

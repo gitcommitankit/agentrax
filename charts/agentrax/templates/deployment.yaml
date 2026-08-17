@@ -45,7 +45,7 @@ spec:
             {{- if hasKey .Values.manager "metricsSecure" }}
             - --metrics-secure={{ .Values.manager.metricsSecure }}
             {{- end }}
-            - --registry-bind-address={{ .Values.registry.bindAddress | default ":9090" }}
+            - --registry-bind-address=:{{ .Values.registry.bindPort | default 9090 }}
             - --gpu-resource-name={{ .Values.manager.gpuResourceName | default "nvidia.com/gpu" }}
             {{- if .Values.prometheus.url }}
             - --prometheus-url={{ .Values.prometheus.url }}
@@ -76,6 +76,11 @@ spec:
             - name: health
               containerPort: {{ .Values.manager.healthProbeBindPort | default 8081 }}
               protocol: TCP
+            {{- if and .Values.manager.metricsBindAddress (ne .Values.manager.metricsBindAddress "0") }}
+            - name: {{ if eq (toString .Values.manager.metricsSecure) "false" }}http{{ else }}https{{ end }}
+              containerPort: {{ if eq .Values.manager.metricsBindAddress ":8080" }}8080{{ else if eq .Values.manager.metricsBindAddress ":8443" }}8443{{ else if eq (toString .Values.manager.metricsSecure) "false" }}8080{{ else }}8443{{ end }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
