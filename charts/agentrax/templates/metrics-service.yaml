@@ -1,0 +1,18 @@
+{{- if and .Values.manager.metricsBindAddress (ne .Values.manager.metricsBindAddress "0") -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentrax.fullname" . }}-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentrax.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agentrax.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ if eq (toString .Values.manager.metricsSecure) "false" }}http{{ else }}https{{ end }}
+      port: {{ if eq .Values.manager.metricsBindAddress ":8080" }}8080{{ else if eq .Values.manager.metricsBindAddress ":8443" }}8443{{ else if eq (toString .Values.manager.metricsSecure) "false" }}8080{{ else }}8443{{ end }}
+      targetPort: {{ if eq .Values.manager.metricsBindAddress ":8080" }}8080{{ else if eq .Values.manager.metricsBindAddress ":8443" }}8443{{ else if eq (toString .Values.manager.metricsSecure) "false" }}8080{{ else }}8443{{ end }}
+      protocol: TCP
+{{- end }}

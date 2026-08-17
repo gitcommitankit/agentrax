@@ -1,0 +1,33 @@
+apiVersion: agentrax.io/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: canary-agent
+  namespace: tenant-search
+  labels:
+    app.kubernetes.io/part-of: agentrax-demo
+spec:
+  image: gcr.io/google-containers/echoserver:1.4
+  port: 8080
+  tenantRef: team-search
+  replicas:
+    min: 1
+    max: 4
+    metric: queueDepth
+    target: 50
+  rollout:
+    strategy: Canary
+    steps:
+      - setWeight: 20
+      - pause: 60s
+      - setWeight: 50
+      - pause: 120s
+      - setWeight: 100
+    rollback:
+      maxErrorRate: "1%"
+      maxP99LatencyMs: 450
+      minRequestSample: 100
+  mcp:
+    expose: true
+    tools:
+      - webSearch
+      - summarizer

@@ -65,7 +65,7 @@ reviews:
         - Finalizer constant must be `AgentDeploymentFinalizer` = `"agentrax.io/mcp-deregister"`.
           Never hardcode the string directly; always use the constant.
         - Validation markers (`+kubebuilder:validation:*`) on spec fields must
-          match the rules in docs/agentrax.md section 6.3. Pay special attention
+          match the rules in docs/ARCHITECTURE.md. Pay special attention
           to enum values for `spec.replicas.metric` and `spec.rollout.strategy`.
 
     # Reconciler — enforce controller-runtime patterns strictly.
@@ -222,7 +222,7 @@ reviews:
       instructions: |
         - Any change to a CRD field, architecture boundary, or package
           responsibility must be reflected here in the same PR.
-        - `docs/agentrax.md` is the source of truth for architecture decisions.
+        - `docs/ARCHITECTURE.md` is the source of truth for architecture decisions.
           Flag any PR that changes architecture without updating it.
 
   # ── Custom review instructions (global) ──────────────────────────────────

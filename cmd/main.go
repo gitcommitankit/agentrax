@@ -147,7 +147,7 @@ func main() {
 	flag.StringVar(&registryAddr, "registry-bind-address", ":9090",
 		"The address the MCP discovery registry HTTP endpoint binds to.")
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -169,10 +169,15 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Resolve the webhook-enabled flag once so both the server creation and
-	// handler registration use the same value. Log it explicitly so operators
-	// can confirm the resolved state at startup.
-	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	// Resolve the webhook-enabled flag. Enable webhook server only if explicitly set
+	// to "true" or if TLS certificates are present in /tmp/k8s-webhook-server/serving-certs.
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") == "true"
+	if _, err := os.Stat("/tmp/k8s-webhook-server/serving-certs/tls.crt"); err == nil {
+		enableWebhooks = true
+	}
+	if os.Getenv("ENABLE_WEBHOOKS") == "false" {
+		enableWebhooks = false
+	}
 	setupLog.Info("webhook state resolved", "enabled", enableWebhooks)
 
 	var webhookServer webhook.Server
@@ -210,6 +215,45 @@ func main() {
 	registryNamespace := os.Getenv("POD_NAMESPACE")
 	if registryNamespace == "" {
 		registryNamespace = "agentrax-system"
+	}
+
+	registryTTL := registry.DefaultTTL
+	if v := os.Getenv("AGENTRAX_REGISTRY_TTL"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			setupLog.Error(err, "failed to parse AGENTRAX_REGISTRY_TTL, using default",
+				"value", v, "default", registry.DefaultTTL)
+		} else if parsed < time.Second {
+			setupLog.Error(errors.New("duration must be at least 1s"),
+				"sub-second AGENTRAX_REGISTRY_TTL rejected, using default",
+				"value", v, "default", registry.DefaultTTL)
+		} else {
+			registryTTL = parsed
+		}
+	}
+
+	mcpHealthInterval := 60 * time.Second
+	if v := os.Getenv("AGENTRAX_MCP_HEALTH_INTERVAL"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			setupLog.Error(err, "failed to parse AGENTRAX_MCP_HEALTH_INTERVAL, using default",
+				"value", v, "default", mcpHealthInterval)
+		} else if parsed < time.Second {
+			setupLog.Error(errors.New("duration must be at least 1s"),
+				"sub-second AGENTRAX_MCP_HEALTH_INTERVAL rejected, using default",
+				"value", v, "default", mcpHealthInterval)
+		} else {
+			mcpHealthInterval = parsed
+		}
+	}
+
+	if mcpHealthInterval >= registryTTL {
+		adjusted := registryTTL / 2
+		setupLog.Info("AGENTRAX_MCP_HEALTH_INTERVAL must be strictly less than AGENTRAX_REGISTRY_TTL",
+			"configuredInterval", mcpHealthInterval,
+			"registryTTL", registryTTL,
+			"adjustedInterval", adjusted)
+		mcpHealthInterval = adjusted
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -267,7 +311,7 @@ func main() {
 	}
 
 	// Initialize MCP discovery registry and registrar.
-	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registry.DefaultTTL)
+	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registryTTL)
 	mcpRegistrar := registry.NewRegistrar(mcpRegistry, registry.NewHTTPMCPClient())
 
 	if registryAddr != "" && registryAddr != "0" {
@@ -282,11 +326,12 @@ func main() {
 	}
 
 	agentDeploymentReconciler := &controller.AgentDeploymentReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		GPUResourceName:  gpuResourceName,
-		CanaryController: canaryController,
-		Registrar:        mcpRegistrar,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		GPUResourceName:   gpuResourceName,
+		CanaryController:  canaryController,
+		Registrar:         mcpRegistrar,
+		MCPHealthInterval: mcpHealthInterval,
 	}
 	if canaryController != nil {
 		canaryController.Registrar = mcpRegistrar

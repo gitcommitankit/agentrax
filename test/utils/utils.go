@@ -110,6 +110,13 @@ func LoadImageToKindClusterWithName(name string) error {
 	cluster := "kind"
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
+	} else if ctxCmd := exec.Command("kubectl", "config", "current-context"); ctxCmd != nil {
+		if out, err := ctxCmd.Output(); err == nil {
+			ctxStr := strings.TrimSpace(string(out))
+			if strings.HasPrefix(ctxStr, "kind-") {
+				cluster = strings.TrimPrefix(ctxStr, "kind-")
+			}
+		}
 	}
 	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
 	cmd := exec.Command("kind", kindOptions...)

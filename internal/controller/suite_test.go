@@ -68,6 +68,10 @@ var mgrDone chan struct{}
 // and clear it in AfterEach to avoid contaminating other tests.
 var testReconciler *AgentDeploymentReconciler
 
+// testRegistrarProxy is a thread-safe proxy installed in testReconciler.Registrar
+// before manager start. Tests can safely swap the delegate via SetDelegate.
+var testRegistrarProxy *registrarProxy
+
 // testEnforcer is the shared quota Enforcer used by the TenantQuota reconciler
 // and the validating webhook in integration tests.
 var testEnforcer *quota.Enforcer
@@ -201,11 +205,15 @@ var _ = BeforeSuite(func() {
 	testMockMCP = &testMockMCPClient{}
 	testRegistrar = registry.NewRegistrar(testRegistry, testMockMCP)
 
+	// Install a thread-safe proxy so tests can swap the registrar delegate
+	// without data races after the manager starts.
+	testRegistrarProxy = newRegistrarProxy(testRegistrar)
+
 	testReconciler = &AgentDeploymentReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		GPUResourceName: quota.DefaultGPUResourceName,
-		Registrar:       testRegistrar,
+		Registrar:       testRegistrarProxy,
 	}
 	Expect(testReconciler.SetupWithManager(mgr)).To(Succeed())
 

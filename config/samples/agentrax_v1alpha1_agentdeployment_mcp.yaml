@@ -1,0 +1,23 @@
+apiVersion: agentrax.io/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: search-agent
+  namespace: tenant-search
+  labels:
+    app.kubernetes.io/part-of: agentrax-demo
+spec:
+  image: gcr.io/google-containers/echoserver:1.4
+  port: 8080
+  tenantRef: team-search
+  replicas:
+    min: 1
+    max: 3
+    metric: queueDepth
+    target: 50
+  rollout:
+    strategy: Recreate
+  mcp:
+    expose: true
+    tools:
+      - search
+      - summarizer

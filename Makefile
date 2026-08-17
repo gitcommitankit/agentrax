@@ -68,6 +68,10 @@ test: manifests generate fmt vet envtest ## Run tests.
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
 
+.PHONY: test-e2e-soak
+test-e2e-soak: ## Run the long-running autoscaling soak test suite.
+	go test ./test/e2e/... -tags e2e -v --timeout 25m -run TestE2E
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run

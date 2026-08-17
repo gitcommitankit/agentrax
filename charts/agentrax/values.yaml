@@ -31,6 +31,8 @@ podAnnotations: {}
 # -- Pod security context.
 podSecurityContext:
   runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
 
 # -- Container security context.
 securityContext:
@@ -40,8 +42,6 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
   runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
 
 resources:
   limits:
@@ -60,20 +60,50 @@ tolerations: []
 # -- Affinity rules for the manager pod.
 affinity: {}
 
-# -- Manager flags
+# -- Manager flags & options
 manager:
   # -- Enable leader election (set to true for HA / multiple replicas).
   leaderElect: false
-  # -- Bind address for metrics. Use ":8443" for HTTPS, ":8080" for HTTP.
+  # -- Bind address for metrics. Use ":8443" for HTTPS, ":8080" for HTTP, "0" to disable.
   metricsBindAddress: "0"
-  # -- Bind address for health/readiness probes.
-  healthProbeBindAddress: ":8081"
+  # -- Serve metrics securely over HTTPS. Set to false for HTTP.
+  metricsSecure: true
+  # -- Bind port for health/readiness probes (used for container port, probes, and manager bind address).
+  healthProbeBindPort: 8081
   # -- GPU resource name used for quota calculation.
   gpuResourceName: "nvidia.com/gpu"
 
+# -- Prometheus configuration for canary rollout metrics
+prometheus:
+  # -- Prometheus HTTP API endpoint (e.g. "http://prometheus-operated.monitoring.svc:9090").
+  # If empty, canary rollout threshold evaluations will fall back to recreate strategy.
+  url: ""
+
+# -- Gateway API configuration for canary traffic splitting
+gateway:
+  # -- Name of the Gateway API Gateway object.
+  name: "agentrax-gateway"
+  # -- Namespace of the Gateway API Gateway object.
+  namespace: "agentrax-system"
+
+# -- MCP discovery registry configuration
+registry:
+  # -- Service configuration
+  service:
+    # -- Registry Service port
+    port: 9090
+    # -- Registry Service type
+    type: ClusterIP
+  # -- Bind port for the registry HTTP server (used for container port, service targetPort, and manager bind address).
+  bindPort: 9090
+  # -- Registry entry TTL (e.g. "90s")
+  ttl: "90s"
+
+# -- MCP client configuration
+mcp:
+  # -- Periodic health check interval for registered agents (e.g. "30s")
+  healthInterval: "30s"
+
 # -- Environment variables injected into the manager container.
-env:
-  # -- MCP health-check interval (e.g. "30s").
-  AGENTRAX_MCP_HEALTH_INTERVAL: "30s"
-  # -- Registry entry TTL (e.g. "90s").
-  AGENTRAX_REGISTRY_TTL: "90s"
+# These values are automatically populated from registry.ttl and mcp.healthInterval above.
+env: {}

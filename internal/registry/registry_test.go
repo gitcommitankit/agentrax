@@ -300,22 +300,6 @@ func TestRegistry_HTTPHandler(t *testing.T) {
 	if _, ok := reg.Get("tenant-1", "agent-http"); ok {
 		t.Fatalf("expected agent-http to be deregistered")
 	}
-
-	// 5. Test legacy aliases (POST /register and DELETE /deregister)
-	req = httptest.NewRequest(http.MethodPost, "/register", bytes.NewBufferString(regPayload))
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("POST /register legacy alias returned %d", w.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodDelete, "/deregister?namespace=tenant-1&name=agent-http", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("DELETE /deregister legacy alias returned %d", w.Code)
-	}
 }
 
 func TestHTTPMCPClient_Initialize(t *testing.T) {

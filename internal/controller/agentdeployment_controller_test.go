@@ -204,16 +204,19 @@ var _ = Describe("AgentDeployment Controller", func() {
 				return k8sClient.Get(ctx, key, &corev1.Service{})
 			}, testTimeout, testInterval).Should(Succeed(), "child Service should exist before deletion")
 
-			// Inject a Deregister hook. A buffered channel is used so the hook
+			// Inject a mock Registrar. A buffered channel is used so the hook
 			// (called on the reconciler goroutine) can pass its observation to the
 			// test goroutine without a data race on plain booleans.
 			resultCh := make(chan bool, 1)
-			testReconciler.SetDeregister(func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
-				err := k8sClient.Get(hctx, key, &corev1.Service{})
-				resultCh <- (err == nil)
-				return nil
-			})
-			DeferCleanup(func() { testReconciler.SetDeregister(nil) })
+			mockReg := &mockAgentRegistrar{
+				deregisterFn: func(hctx context.Context, had *agentraxv1alpha1.AgentDeployment) error {
+					err := k8sClient.Get(hctx, key, &corev1.Service{})
+					resultCh <- (err == nil)
+					return nil
+				},
+			}
+			testRegistrarProxy.SetDelegate(mockReg)
+			DeferCleanup(func() { testRegistrarProxy.SetDelegate(testRegistrar) })
 
 			// Delete the object — the reconciler must call Deregister, then remove the finalizer.
 			Expect(k8sClient.Delete(ctx, ad)).To(Succeed())
