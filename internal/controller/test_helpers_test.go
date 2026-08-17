@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -78,4 +79,44 @@ func (m *mockAgentRegistrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1
 		return m.heartbeatFn(ctx, ad)
 	}
 	return nil
+}
+
+// registrarProxy is a thread-safe proxy that wraps an AgentRegistrar and
+// allows per-test swapping of the delegate without data races.
+// This is installed once in the reconciler before manager start, then tests
+// can safely swap the delegate using SetDelegate.
+type registrarProxy struct {
+	mu       sync.RWMutex
+	delegate AgentRegistrar
+}
+
+func newRegistrarProxy(initial AgentRegistrar) *registrarProxy {
+	return &registrarProxy{delegate: initial}
+}
+
+func (p *registrarProxy) SetDelegate(d AgentRegistrar) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.delegate = d
+}
+
+func (p *registrarProxy) Register(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	p.mu.RLock()
+	d := p.delegate
+	p.mu.RUnlock()
+	return d.Register(ctx, ad)
+}
+
+func (p *registrarProxy) Deregister(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	p.mu.RLock()
+	d := p.delegate
+	p.mu.RUnlock()
+	return d.Deregister(ctx, ad)
+}
+
+func (p *registrarProxy) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	p.mu.RLock()
+	d := p.delegate
+	p.mu.RUnlock()
+	return d.Heartbeat(ctx, ad)
 }

@@ -58,27 +58,31 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: AGENTRAX_REGISTRY_TTL
+              value: {{ .Values.registry.ttl | default "90s" | quote }}
+            - name: AGENTRAX_MCP_HEALTH_INTERVAL
+              value: {{ .Values.mcp.healthInterval | default "30s" | quote }}
             {{- range $key, $val := .Values.env }}
             - name: {{ $key }}
               value: {{ $val | quote }}
             {{- end }}
           ports:
             - name: registry
-              containerPort: 9090
+              containerPort: {{ .Values.registry.bindPort | default 9090 }}
               protocol: TCP
             - name: health
-              containerPort: 8081
+              containerPort: {{ .Values.manager.healthProbeBindPort | default 8081 }}
               protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: {{ .Values.manager.healthProbeBindPort | default 8081 }}
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: {{ .Values.manager.healthProbeBindPort | default 8081 }}
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:

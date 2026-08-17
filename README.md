@@ -94,11 +94,13 @@ flowchart TB
    cd agentrax
    ```
 
-2. **Install cluster dependencies** (cert-manager, Prometheus Operator, Gateway API CRDs):
+2. **Install cluster dependencies** (cert-manager, Prometheus Operator, Gateway API CRDs, and Prometheus Adapter):
 
    ```bash
    make deploy-deps
    ```
+
+   Note: Prometheus Adapter installation instructions are printed by `make deploy-deps`. Follow the displayed guidance to complete the metrics pipeline setup.
 
 3. **Install Agentrax CRDs:**
 
@@ -113,6 +115,7 @@ flowchart TB
    ```
 
 5. **Verify the operator is running:**
+
    ```bash
    kubectl get pods -n agentrax-system
    ```
@@ -245,14 +248,16 @@ curl -s http://localhost:9090/agents | jq .
 ]
 ```
 
+The `ttl` field is expressed in nanoseconds (e.g., `90000000000` = 90 seconds).
+
 ### Endpoints
 
-| Method   | Path                         | Description                                                       |
-| -------- | ---------------------------- | ----------------------------------------------------------------- |
-| `GET`    | `/agents`                    | List all active, non-expired registered agents.                   |
-| `GET`    | `/agents/{namespace}/{name}` | Get details and discovered tool capabilities of a specific agent. |
-| `POST`   | `/agents`                    | Register or update an agent entry directly.                       |
-| `DELETE` | `/agents/{namespace}/{name}` | Deregister an agent from the registry store.                      |
+| Method   | Path                         | Description                                                                                                                 |
+| -------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/agents`                    | List all active, non-expired registered agents.                                                                             |
+| `GET`    | `/agents/{namespace}/{name}` | Get details and discovered tool capabilities of a specific agent.                                                           |
+| `POST`   | `/agents`                    | Directly register or update an agent entry (bypasses MCP handshake; for administrative use or testing, not normal operation). |
+| `DELETE` | `/agents/{namespace}/{name}` | Deregister an agent from the registry store.                                                                                |
 
 ---
 

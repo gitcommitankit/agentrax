@@ -97,6 +97,11 @@ type AgentDeploymentReconciler struct {
 	// When nil, MCP registration features are disabled.
 	Registrar AgentRegistrar
 
+	// MCPHealthInterval is the requeue interval used to drive periodic MCP
+	// heartbeat probes. Must stay shorter than the registry TTL so heartbeats
+	// land before entries expire. Defaults to 60s when zero.
+	MCPHealthInterval time.Duration
+
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
 	hasServiceMonitorCRD bool
@@ -618,8 +623,11 @@ func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context
 		return 0
 	}
 
-	// Requeue interval shorter than TTL (90s) to ensure heartbeats occur before expiry.
-	requeueInterval := 60 * time.Second
+	// Requeue interval shorter than the registry TTL to ensure heartbeats occur before expiry.
+	requeueInterval := r.MCPHealthInterval
+	if requeueInterval <= 0 {
+		requeueInterval = 60 * time.Second
+	}
 
 	// If already registered, perform heartbeat probe.
 	if ad.Status.Registered {

@@ -68,6 +68,8 @@ manager:
   metricsBindAddress: "0"
   # -- Bind address for health/readiness probes.
   healthProbeBindAddress: ":8081"
+  # -- Bind port for health/readiness probes (referenced by liveness/readiness probes).
+  healthProbeBindPort: 8081
   # -- GPU resource name used for quota calculation.
   gpuResourceName: "nvidia.com/gpu"
 
@@ -94,6 +96,8 @@ registry:
     type: ClusterIP
   # -- Bind address for the in-operator registry HTTP server
   bindAddress: ":9090"
+  # -- Bind port for the registry HTTP server (referenced by container port and targetPort).
+  bindPort: 9090
   # -- Registry entry TTL (e.g. "90s")
   ttl: "90s"
 
@@ -103,6 +107,5 @@ mcp:
   healthInterval: "30s"
 
 # -- Environment variables injected into the manager container.
-env:
-  AGENTRAX_MCP_HEALTH_INTERVAL: "30s"
-  AGENTRAX_REGISTRY_TTL: "90s"
+# These values are automatically populated from registry.ttl and mcp.healthInterval above.
+env: {}

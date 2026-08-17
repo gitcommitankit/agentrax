@@ -106,9 +106,18 @@ func TestQueryTemplates(t *testing.T) {
 	ad := makeAD("my-agent", "tenant-prod", "1%", 200)
 	window := 2 * time.Minute
 
-	reqQuery := requestCountQuery(ad.Name, ad.Namespace, window)
-	errQuery := errorRateQuery(ad.Name, ad.Namespace, window)
-	p99Query := p99LatencyQuery(ad.Name, ad.Namespace, window)
+	reqQuery, err := requestCountQuery(ad.Name, ad.Namespace, window)
+	if err != nil {
+		t.Fatalf("requestCountQuery returned unexpected error: %v", err)
+	}
+	errQuery, err := errorRateQuery(ad.Name, ad.Namespace, window)
+	if err != nil {
+		t.Fatalf("errorRateQuery returned unexpected error: %v", err)
+	}
+	p99Query, err := p99LatencyQuery(ad.Name, ad.Namespace, window)
+	if err != nil {
+		t.Fatalf("p99LatencyQuery returned unexpected error: %v", err)
+	}
 
 	for name, q := range map[string]string{
 		"requestCount": reqQuery,
@@ -368,9 +377,29 @@ func TestPromDuration_Format(t *testing.T) {
 		{0, "0s"},
 	}
 	for _, tc := range cases {
-		got := promDuration(tc.in)
+		got, err := promDuration(tc.in)
+		if err != nil {
+			t.Errorf("promDuration(%v) returned unexpected error: %v", tc.in, err)
+		}
 		if got != tc.want {
 			t.Errorf("promDuration(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestPromDuration_RejectsSubMillisecond verifies that promDuration rejects
+// sub-millisecond durations (e.g. 100ns, 500µs) which cannot be accurately
+// represented in PromQL range selectors.
+func TestPromDuration_RejectsSubMillisecond(t *testing.T) {
+	cases := []time.Duration{
+		100 * time.Nanosecond,
+		500 * time.Microsecond,
+		1*time.Millisecond + 100*time.Nanosecond,
+	}
+	for _, d := range cases {
+		got, err := promDuration(d)
+		if err == nil {
+			t.Errorf("promDuration(%v) = %q, expected an error for sub-millisecond precision", d, got)
 		}
 	}
 }

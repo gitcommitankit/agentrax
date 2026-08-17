@@ -37,49 +37,62 @@ import (
 // The label selectors match the canary Deployment's pod labels:
 //   - app.kubernetes.io/name=<adName>
 //   - agentrax.io/variant=canary (propagated from pod labels via ServiceMonitor)
-func requestCountQuery(adName, namespace string, window time.Duration) string {
+func requestCountQuery(adName, namespace string, window time.Duration) (string, error) {
+	d, err := promDuration(window)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(
 		`sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])) or vector(0)`,
-		namespace, adName, promDuration(window),
-	)
+		namespace, adName, d,
+	), nil
 }
 
 // errorRateQuery returns a PromQL expression computing the fraction of 5xx
 // responses out of total requests for the canary, over the given window.
 // Returns 0 if no requests have been received (safe division).
-func errorRateQuery(adName, namespace string, window time.Duration) string {
-	d := promDuration(window)
+func errorRateQuery(adName, namespace string, window time.Duration) (string, error) {
+	d, err := promDuration(window)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(
 		`(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary",code=~"5.."}[%s])) or vector(0))`+
 			` / on() group_left `+
 			`clamp_min(sum(increase(http_requests_total{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])) or vector(0), 1)`,
 		namespace, adName, d,
 		namespace, adName, d,
-	)
+	), nil
 }
 
 // p99LatencyQuery returns a PromQL expression for the 99th-percentile request
 // latency in milliseconds for the canary pods over the given window.
-func p99LatencyQuery(adName, namespace string, window time.Duration) string {
+func p99LatencyQuery(adName, namespace string, window time.Duration) (string, error) {
+	d, err := promDuration(window)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(
 		`histogram_quantile(0.99, sum by (le) (`+
 			`rate(http_request_duration_milliseconds_bucket{namespace=%q,app_kubernetes_io_name=%q,agentrax_io_variant="canary"}[%s])))`,
-		namespace, adName, promDuration(window),
-	)
+		namespace, adName, d,
+	), nil
 }
 
 // promDuration formats a time.Duration into canonical Prometheus duration syntax
 // understood by range selectors and the rate()/increase() functions.
 // e.g. 5*time.Minute → "5m", 1*time.Hour → "1h", 30*time.Second → "30s".
-func promDuration(d time.Duration) string {
+// Returns an error for durations with sub-millisecond precision, which cannot
+// be accurately represented in PromQL range selectors.
+func promDuration(d time.Duration) (string, error) {
 	if d <= 0 {
-		return "0s"
+		return "0s", nil
 	}
 	if d%time.Second != 0 {
 		if d%time.Millisecond == 0 {
-			return fmt.Sprintf("%dms", d/time.Millisecond)
+			return fmt.Sprintf("%dms", d/time.Millisecond), nil
 		}
-		return fmt.Sprintf("%gs", d.Seconds())
+		return "", fmt.Errorf("duration %v has sub-millisecond precision, which PromQL range selectors cannot represent", d)
 	}
 
 	hours := d / time.Hour
@@ -98,7 +111,7 @@ func promDuration(d time.Duration) string {
 	if secs > 0 {
 		b.WriteString(fmt.Sprintf("%ds", secs))
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────────
@@ -141,7 +154,11 @@ func Evaluate(
 	policy := ad.Spec.Rollout.Rollback
 
 	// ── 1. Sample-size gate ───────────────────────────────────────────────────
-	sampleCount, err := promClient.QueryScalar(ctx, requestCountQuery(name, ns, window))
+	reqCountQuery, err := requestCountQuery(name, ns, window)
+	if err != nil {
+		return EvaluationResult{}, fmt.Errorf("building request count query: %w", err)
+	}
+	sampleCount, err := promClient.QueryScalar(ctx, reqCountQuery)
 	if err != nil {
 		return EvaluationResult{}, fmt.Errorf("querying request count: %w", err)
 	}
@@ -159,7 +176,11 @@ func Evaluate(
 	}
 
 	// ── 2. Error rate threshold ───────────────────────────────────────────────
-	errorRate, err := promClient.QueryScalar(ctx, errorRateQuery(name, ns, window))
+	errRateQuery, err := errorRateQuery(name, ns, window)
+	if err != nil {
+		return EvaluationResult{}, fmt.Errorf("building error rate query: %w", err)
+	}
+	errorRate, err := promClient.QueryScalar(ctx, errRateQuery)
 	if err != nil {
 		return EvaluationResult{}, fmt.Errorf("querying error rate: %w", err)
 	}
@@ -189,7 +210,11 @@ func Evaluate(
 	}
 
 	// ── 3. p99 latency threshold ──────────────────────────────────────────────
-	p99Ms, err := promClient.QueryScalar(ctx, p99LatencyQuery(name, ns, window))
+	p99Query, err := p99LatencyQuery(name, ns, window)
+	if err != nil {
+		return EvaluationResult{}, fmt.Errorf("building p99 latency query: %w", err)
+	}
+	p99Ms, err := promClient.QueryScalar(ctx, p99Query)
 	if err != nil {
 		return EvaluationResult{}, fmt.Errorf("querying p99 latency: %w", err)
 	}

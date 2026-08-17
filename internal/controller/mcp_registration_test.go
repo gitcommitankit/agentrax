@@ -308,8 +308,7 @@ var _ = Describe("MCP Registration Integration", func() {
 
 		// Install a mock Registrar that verifies Service still exists during Deregister.
 		var serviceExistedDuringDeregister atomic.Bool
-		origRegistrar := testReconciler.Registrar
-		testReconciler.Registrar = &mockAgentRegistrar{
+		mockReg := &mockAgentRegistrar{
 			deregisterFn: func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 				svc := &corev1.Service{}
 				svcKey := types.NamespacedName{Name: adName, Namespace: ns}
@@ -318,7 +317,8 @@ var _ = Describe("MCP Registration Integration", func() {
 				return testRegistrar.Deregister(ctx, ad)
 			},
 		}
-		defer func() { testReconciler.Registrar = origRegistrar }()
+		testRegistrarProxy.SetDelegate(mockReg)
+		defer func() { testRegistrarProxy.SetDelegate(testRegistrar) }()
 
 		// Delete the AgentDeployment
 		fetched := &agentraxv1alpha1.AgentDeployment{}

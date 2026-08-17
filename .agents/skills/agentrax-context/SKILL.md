@@ -3,6 +3,8 @@ name: agentrax-context
 description: Project context and settled architecture decisions for the Agentrax Kubernetes operator (module agentrax.io/v1alpha1, repo agentrax). Always consult this before writing, reviewing, or reasoning about any code in this repository — CRD types, the reconciler, the rollout controller, the autoscaler, the quota webhook, or the MCP registry — so implementation stays consistent with the design doc instead of drifting or re-deriving decisions that are already settled. Trigger on any mention of AgentDeployment, TenantQuota, canary rollout, or this repo's controllers, even if the user doesn't name the skill directly.
 ---
 
+# Agentrax Context Skill
+
 > When uncertain about any architecture decision, defer to `docs/ARCHITECTURE.md` rather than improvising. Don't guess when the doc has the answer.
 
 ## Non-negotiable terminology
@@ -26,7 +28,7 @@ description: Project context and settled architecture decisions for the Agentrax
 | Package                | Responsibility                                                                                                                   |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `api/v1alpha1/`        | CRD Go types, validation markers, defaulting. No business logic.                                                                 |
-| `internal/controller/` | Reconcile loops. Only code that calls the Kubernetes API for core owned resources.                                               |
+| `internal/controller/` | Reconcile loops. Only code that calls the Kubernetes API for core-owned resources.                                               |
 | `internal/rollout/`    | Canary state machine and PromQL threshold evaluation.                                                                            |
 | `internal/scaling/`    | HPA generation and quota-capped scaling logic.                                                                                   |
 | `internal/registry/`   | MCP registrar, registry HTTP handler, TTL sweep.                                                                                 |

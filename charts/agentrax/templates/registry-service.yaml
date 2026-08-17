@@ -13,5 +13,5 @@ spec:
   ports:
     - name: registry
       port: {{ .Values.registry.service.port | default 9090 }}
-      targetPort: 9090
+      targetPort: {{ .Values.registry.bindPort | default 9090 }}
       protocol: TCP

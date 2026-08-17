@@ -217,6 +217,24 @@ func main() {
 		registryNamespace = "agentrax-system"
 	}
 
+	registryTTL := registry.DefaultTTL
+	if v := os.Getenv("AGENTRAX_REGISTRY_TTL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			registryTTL = parsed
+		} else {
+			setupLog.Error(err, "invalid AGENTRAX_REGISTRY_TTL, using default", "default", registry.DefaultTTL)
+		}
+	}
+
+	mcpHealthInterval := 60 * time.Second
+	if v := os.Getenv("AGENTRAX_MCP_HEALTH_INTERVAL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			mcpHealthInterval = parsed
+		} else {
+			setupLog.Error(err, "invalid AGENTRAX_MCP_HEALTH_INTERVAL, using default", "default", mcpHealthInterval)
+		}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -272,7 +290,7 @@ func main() {
 	}
 
 	// Initialize MCP discovery registry and registrar.
-	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registry.DefaultTTL)
+	mcpRegistry := registry.NewRegistry(mgr.GetClient(), registryNamespace, registryTTL)
 	mcpRegistrar := registry.NewRegistrar(mcpRegistry, registry.NewHTTPMCPClient())
 
 	if registryAddr != "" && registryAddr != "0" {
@@ -287,11 +305,12 @@ func main() {
 	}
 
 	agentDeploymentReconciler := &controller.AgentDeploymentReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		GPUResourceName:  gpuResourceName,
-		CanaryController: canaryController,
-		Registrar:        mcpRegistrar,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		GPUResourceName:   gpuResourceName,
+		CanaryController:  canaryController,
+		Registrar:         mcpRegistrar,
+		MCPHealthInterval: mcpHealthInterval,
 	}
 	if canaryController != nil {
 		canaryController.Registrar = mcpRegistrar
