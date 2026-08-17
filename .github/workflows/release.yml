@@ -57,12 +57,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Install Kustomize & Generate Consolidated YAML
+      - name: Generate Consolidated YAML
         run: |
-          make kustomize
-          mkdir -p dist
-          ./bin/kustomize edit set image controller=ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }} --dir config/manager
-          ./bin/kustomize build config/default > dist/install.yaml
+          make build-installer IMG=ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
