@@ -17,12 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 )
 
 const (
@@ -47,4 +50,32 @@ func namespaceObject(name string) *corev1.Namespace {
 // inNamespace returns a ListOption that filters by namespace.
 func inNamespace(ns string) client.ListOption {
 	return client.InNamespace(ns)
+}
+
+// mockAgentRegistrar is a test double implementing AgentRegistrar.
+type mockAgentRegistrar struct {
+	registerFn   func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+	deregisterFn func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+	heartbeatFn  func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+}
+
+func (m *mockAgentRegistrar) Register(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	if m.registerFn != nil {
+		return m.registerFn(ctx, ad)
+	}
+	return nil
+}
+
+func (m *mockAgentRegistrar) Deregister(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	if m.deregisterFn != nil {
+		return m.deregisterFn(ctx, ad)
+	}
+	return nil
+}
+
+func (m *mockAgentRegistrar) Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+	if m.heartbeatFn != nil {
+		return m.heartbeatFn(ctx, ad)
+	}
+	return nil
 }

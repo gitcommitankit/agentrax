@@ -66,6 +66,13 @@ echo "🧪 [pre-push] Running full test suite and manifest verification..."
 echo "  -> make manifests generate..."
 make manifests generate
 
+# Verify no uncommitted manifest/codegen drift
+if ! git diff --quiet config/ api/; then
+    echo "❌ [pre-push] Generated manifests or code have uncommitted changes!"
+    echo "   Please commit the generated changes before pushing."
+    exit 1
+fi
+
 # Run test suite
 echo "  -> make test..."
 make test
@@ -74,6 +81,12 @@ make test
 echo "  -> Verifying config/default kustomization..."
 if [ -f "./bin/kustomize" ]; then
     ./bin/kustomize build config/default > /dev/null
+fi
+
+# Verify Helm chart if helm is available
+if command -v helm >/dev/null 2>&1 && [ -d "./charts/agentrax" ]; then
+    echo "  -> helm lint charts/agentrax/..."
+    helm lint charts/agentrax/ > /dev/null
 fi
 
 echo "✅ [pre-push] All pre-push checks passed!"

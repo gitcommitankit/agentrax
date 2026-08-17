@@ -358,7 +358,7 @@ func (r *Registry) loadFromConfigMap(ctx context.Context) error {
 // ── HTTP Handler ──────────────────────────────────────────────────────────────
 
 // Handler returns an http.Handler implementing the registry REST API.
-// It exposes standard RESTful endpoints under /agents as well as legacy aliases (/register, /deregister).
+// It exposes standard RESTful endpoints under /agents.
 func (r *Registry) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -367,10 +367,6 @@ func (r *Registry) Handler() http.Handler {
 	mux.HandleFunc("POST /agents", r.handleRegister)
 	mux.HandleFunc("GET /agents/{namespace}/{name}", r.handleGetAgent)
 	mux.HandleFunc("DELETE /agents/{namespace}/{name}", r.handleDeregisterAgentPath)
-
-	// Backward-compatible RPC action aliases
-	mux.HandleFunc("POST /register", r.handleRegister)
-	mux.HandleFunc("DELETE /deregister", r.handleDeregister)
 
 	return mux
 }
@@ -399,37 +395,6 @@ func (r *Registry) handleDeregisterAgentPath(w http.ResponseWriter, req *http.Re
 
 	if namespace == "" || name == "" {
 		http.Error(w, "namespace and name are required in URL path", http.StatusBadRequest)
-		return
-	}
-
-	if err := r.Deregister(req.Context(), namespace, name); err != nil {
-		http.Error(w, fmt.Sprintf("deregistration failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deregistered"})
-}
-
-// handleDeregister handles legacy HTTP DELETE requests targeting /deregister.
-func (r *Registry) handleDeregister(w http.ResponseWriter, req *http.Request) {
-	namespace := req.URL.Query().Get("namespace")
-	name := req.URL.Query().Get("name")
-
-	if namespace == "" || name == "" {
-		// Also support JSON body if query params are missing
-		var body struct {
-			Namespace string `json:"namespace"`
-			Name      string `json:"name"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&body); err == nil {
-			namespace = body.Namespace
-			name = body.Name
-		}
-	}
-
-	if namespace == "" || name == "" {
-		http.Error(w, "namespace and name are required", http.StatusBadRequest)
 		return
 	}
 

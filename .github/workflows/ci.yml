@@ -49,10 +49,48 @@ jobs:
           name: coverage
           path: cover.out
 
+  helm-lint:
+    name: Helm Lint & Dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Lint Helm Chart
+        run: helm lint charts/agentrax/
+
+      - name: Template Helm Chart
+        run: helm template test charts/agentrax/ --debug
+
+  e2e:
+    name: End-to-End Tests (kind)
+    runs-on: ubuntu-latest
+    needs: [lint, test, helm-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Create kind Cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: agentrax-e2e
+
+      - name: Run E2E Tests
+        run: make test-e2e
+
   build:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, helm-lint, e2e]
     steps:
       - uses: actions/checkout@v4
 

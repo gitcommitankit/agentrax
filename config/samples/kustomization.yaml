@@ -1,5 +1,7 @@
 ## Append samples of your project ##
 resources:
 - agentrax_v1alpha1_agentdeployment.yaml
+- agentrax_v1alpha1_agentdeployment_mcp.yaml
+- agentrax_v1alpha1_agentdeployment_canary.yaml
 - agentrax_v1alpha1_tenantquota.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

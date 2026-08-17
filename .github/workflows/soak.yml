@@ -1,0 +1,33 @@
+name: Autoscaling Soak Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      soak_duration_minutes:
+        description: "Duration to run autoscaling soak in minutes"
+        default: "10"
+        required: false
+
+jobs:
+  soak:
+    name: Autoscaling Soak Test (kind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: agentrax-soak
+
+      - name: Install cluster dependencies
+        run: make deploy-deps
+
+      - name: Run Autoscaling Soak Suite
+        run: make test-e2e-soak

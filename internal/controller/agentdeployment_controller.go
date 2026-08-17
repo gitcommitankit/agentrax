@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -70,7 +69,16 @@ const (
 	quotaStateSkipped
 )
 
+// AgentRegistrar defines the interface for managing agent lifecycle in the MCP discovery registry.
+type AgentRegistrar interface {
+	Register(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+	Deregister(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+	Heartbeat(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
+}
+
 // AgentDeploymentReconciler reconciles an AgentDeployment object.
+// It manages the complete lifecycle of AI agent workloads including Deployments,
+// Services, ServiceMonitors, HPAs, Canary rollouts, and MCP registry registration.
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -87,29 +95,11 @@ type AgentDeploymentReconciler struct {
 
 	// Registrar manages registration and discovery of this agent in the MCP registry.
 	// When nil, MCP registration features are disabled.
-	Registrar *registry.Registrar
+	Registrar AgentRegistrar
 
 	// hasServiceMonitorCRD is set once during SetupWithManager and determines
 	// whether ServiceMonitor reconciliation is attempted at all.
 	hasServiceMonitorCRD bool
-
-	// deregisterMu guards the Deregister field so test goroutines can safely
-	// inject and clear the hook while the reconciler goroutine reads it.
-	deregisterMu sync.Mutex
-
-	// Deregister is an optional hook called during deletion cleanup before the
-	// finalizer is removed. Phase 5 will set this to a real MCP deregistration
-	// function. In tests it can be used to assert ordering invariants.
-	// Always access through SetDeregister / the mutex-protected load in runDeletionCleanup.
-	Deregister func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error
-}
-
-// SetDeregister safely replaces the Deregister hook under the mutex.
-// Use this instead of direct field assignment to avoid data races.
-func (r *AgentDeploymentReconciler) SetDeregister(fn func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error) {
-	r.deregisterMu.Lock()
-	defer r.deregisterMu.Unlock()
-	r.Deregister = fn
 }
 
 // +kubebuilder:rbac:groups=agentrax.io,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -240,22 +230,11 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // runDeletionCleanup performs pre-deletion tasks before the finalizer is removed.
-// If a Deregister hook is set on the reconciler, it is called here so that
-// deregistration happens while child resources (Service, Deployment) still exist.
-// Phase 5 will set Deregister to the real MCP deregistration implementation.
+// It deregisters the agent from the MCP discovery registry while child resources
+// (Service, Deployment) still exist.
 func (r *AgentDeploymentReconciler) runDeletionCleanup(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
 	logger := log.FromContext(ctx)
-	// Load the hook under the mutex so test goroutines can safely inject/clear it
-	// without a data race against this reconciler goroutine.
-	r.deregisterMu.Lock()
-	deregister := r.Deregister
-	r.deregisterMu.Unlock()
-
-	if deregister != nil {
-		if err := deregister(ctx, ad); err != nil {
-			return fmt.Errorf("deregistering agent: %w", err)
-		}
-	} else if r.Registrar != nil {
+	if r.Registrar != nil {
 		if err := r.Registrar.Deregister(ctx, ad); err != nil {
 			return fmt.Errorf("deregistering agent: %w", err)
 		}

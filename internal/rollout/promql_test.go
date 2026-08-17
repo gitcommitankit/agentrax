@@ -124,8 +124,8 @@ func TestQueryTemplates(t *testing.T) {
 		if !strings.Contains(q, `agentrax_io_variant="canary"`) {
 			t.Errorf("%s query missing agentrax_io_variant=canary selector: %q", name, q)
 		}
-		if !strings.Contains(q, "[2m0s]") {
-			t.Errorf("%s query missing duration window [2m0s]: %q", name, q)
+		if !strings.Contains(q, "[2m]") {
+			t.Errorf("%s query missing duration window [2m]: %q", name, q)
 		}
 	}
 }
@@ -352,15 +352,20 @@ func TestEvaluate_ZeroErrors_Absent5xxSeries(t *testing.T) {
 
 // ── promDuration helper ───────────────────────────────────────────────────────
 
-// TestPromDuration_Format verifies that promDuration formats durations correctly.
+// TestPromDuration_Format verifies that promDuration formats durations correctly into canonical Prometheus syntax.
 func TestPromDuration_Format(t *testing.T) {
 	cases := []struct {
 		in   time.Duration
 		want string
 	}{
-		{5 * time.Minute, "5m0s"},
-		{time.Hour, "1h0m0s"},
+		{5 * time.Minute, "5m"},
+		{time.Hour, "1h"},
 		{30 * time.Second, "30s"},
+		{90 * time.Second, "1m30s"},
+		{time.Hour + 15*time.Minute, "1h15m"},
+		{time.Hour + 30*time.Minute + 10*time.Second, "1h30m10s"},
+		{500 * time.Millisecond, "500ms"},
+		{0, "0s"},
 	}
 	for _, tc := range cases {
 		got := promDuration(tc.in)

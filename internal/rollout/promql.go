@@ -23,6 +23,7 @@ package rollout
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
@@ -67,11 +68,37 @@ func p99LatencyQuery(adName, namespace string, window time.Duration) string {
 	)
 }
 
-// promDuration formats a time.Duration into the Prometheus duration string
+// promDuration formats a time.Duration into canonical Prometheus duration syntax
 // understood by range selectors and the rate()/increase() functions.
-// e.g. 5*time.Minute → "5m0s".
+// e.g. 5*time.Minute → "5m", 1*time.Hour → "1h", 30*time.Second → "30s".
 func promDuration(d time.Duration) string {
-	return d.String()
+	if d <= 0 {
+		return "0s"
+	}
+	if d%time.Second != 0 {
+		if d%time.Millisecond == 0 {
+			return fmt.Sprintf("%dms", d/time.Millisecond)
+		}
+		return fmt.Sprintf("%gs", d.Seconds())
+	}
+
+	hours := d / time.Hour
+	d -= hours * time.Hour
+	mins := d / time.Minute
+	d -= mins * time.Minute
+	secs := d / time.Second
+
+	var b strings.Builder
+	if hours > 0 {
+		b.WriteString(fmt.Sprintf("%dh", hours))
+	}
+	if mins > 0 {
+		b.WriteString(fmt.Sprintf("%dm", mins))
+	}
+	if secs > 0 {
+		b.WriteString(fmt.Sprintf("%ds", secs))
+	}
+	return b.String()
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────────

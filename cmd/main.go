@@ -147,7 +147,7 @@ func main() {
 	flag.StringVar(&registryAddr, "registry-bind-address", ":9090",
 		"The address the MCP discovery registry HTTP endpoint binds to.")
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -169,10 +169,15 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Resolve the webhook-enabled flag once so both the server creation and
-	// handler registration use the same value. Log it explicitly so operators
-	// can confirm the resolved state at startup.
-	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	// Resolve the webhook-enabled flag. Enable webhook server only if explicitly set
+	// to "true" or if TLS certificates are present in /tmp/k8s-webhook-server/serving-certs.
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") == "true"
+	if _, err := os.Stat("/tmp/k8s-webhook-server/serving-certs/tls.crt"); err == nil {
+		enableWebhooks = true
+	}
+	if os.Getenv("ENABLE_WEBHOOKS") == "false" {
+		enableWebhooks = false
+	}
 	setupLog.Info("webhook state resolved", "enabled", enableWebhooks)
 
 	var webhookServer webhook.Server

@@ -1,0 +1,18 @@
+{{- if and .Values.manager.metricsBindAddress (ne .Values.manager.metricsBindAddress "0") -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentrax.fullname" . }}-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentrax.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agentrax.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+{{- end }}

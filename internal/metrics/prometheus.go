@@ -35,6 +35,9 @@ import (
 // defaultTimeout is the per-request HTTP timeout used when no custom timeout is set.
 const defaultTimeout = 10 * time.Second
 
+// maxResponseBytes is the maximum allowed response size from Prometheus (1 MiB) to guard against memory exhaustion.
+const maxResponseBytes = 1 << 20
+
 // Client is a lightweight HTTP client for the Prometheus query API.
 // Create one with NewClient; the zero value is not usable.
 type Client struct {
@@ -94,7 +97,7 @@ func (c *Client) QueryScalar(ctx context.Context, query string) (float64, error)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return 0, fmt.Errorf("reading Prometheus response: %w", err)
 	}
@@ -135,7 +138,7 @@ func (c *Client) QueryRange(ctx context.Context, query string, start, end time.T
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return 0, fmt.Errorf("reading Prometheus range response: %w", err)
 	}

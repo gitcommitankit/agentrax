@@ -306,16 +306,19 @@ var _ = Describe("MCP Registration Integration", func() {
 			g.Expect(fetched.Status.Registered).To(BeTrue())
 		}, timeout, interval).Should(Succeed())
 
-		// Install a Deregister hook that verifies Service still exists.
+		// Install a mock Registrar that verifies Service still exists during Deregister.
 		var serviceExistedDuringDeregister atomic.Bool
-		testReconciler.SetDeregister(func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
-			svc := &corev1.Service{}
-			svcKey := types.NamespacedName{Name: adName, Namespace: ns}
-			err := k8sClient.Get(ctx, svcKey, svc)
-			serviceExistedDuringDeregister.Store(err == nil)
-			return testRegistrar.Deregister(ctx, ad)
-		})
-		defer testReconciler.SetDeregister(nil)
+		origRegistrar := testReconciler.Registrar
+		testReconciler.Registrar = &mockAgentRegistrar{
+			deregisterFn: func(ctx context.Context, ad *agentraxv1alpha1.AgentDeployment) error {
+				svc := &corev1.Service{}
+				svcKey := types.NamespacedName{Name: adName, Namespace: ns}
+				err := k8sClient.Get(ctx, svcKey, svc)
+				serviceExistedDuringDeregister.Store(err == nil)
+				return testRegistrar.Deregister(ctx, ad)
+			},
+		}
+		defer func() { testReconciler.Registrar = origRegistrar }()
 
 		// Delete the AgentDeployment
 		fetched := &agentraxv1alpha1.AgentDeployment{}

@@ -3,7 +3,7 @@ name: agentrax-context
 description: Project context and settled architecture decisions for the Agentrax Kubernetes operator (module agentrax.io/v1alpha1, repo agentrax). Always consult this before writing, reviewing, or reasoning about any code in this repository — CRD types, the reconciler, the rollout controller, the autoscaler, the quota webhook, or the MCP registry — so implementation stays consistent with the design doc instead of drifting or re-deriving decisions that are already settled. Trigger on any mention of AgentDeployment, TenantQuota, canary rollout, or this repo's controllers, even if the user doesn't name the skill directly.
 ---
 
-> When uncertain about any architecture decision, defer to `docs/agentrax.md` rather than improvising. Don't guess when the doc has the answer.
+> When uncertain about any architecture decision, defer to `docs/ARCHITECTURE.md` rather than improvising. Don't guess when the doc has the answer.
 
 ## Non-negotiable terminology
 
@@ -23,22 +23,24 @@ description: Project context and settled architecture decisions for the Agentrax
 
 ## Package map
 
-| Package                | Responsibility                                                                            |
-| ---------------------- | ----------------------------------------------------------------------------------------- |
-| `api/v1alpha1/`        | CRD Go types, validation markers, defaulting. No business logic.                          |
-| `internal/controller/` | Reconcile loops. Only code that calls the Kubernetes API for core owned resources.        |
-| `internal/rollout/`    | Canary state machine and PromQL threshold evaluation.                                     |
-| `internal/scaling/`    | HPA generation and quota-capped scaling logic.                                            |
-| `internal/registry/`   | MCP registrar, registry HTTP handler, TTL sweep.                                          |
-| `internal/quota/`      | Quota arithmetic and in-flight reservation. Shared by webhook and TenantQuota reconciler. |
+| Package                | Responsibility                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `api/v1alpha1/`        | CRD Go types, validation markers, defaulting. No business logic.                                                                 |
+| `internal/controller/` | Reconcile loops. Only code that calls the Kubernetes API for core owned resources.                                               |
+| `internal/rollout/`    | Canary state machine and PromQL threshold evaluation.                                                                            |
+| `internal/scaling/`    | HPA generation and quota-capped scaling logic.                                                                                   |
+| `internal/registry/`   | MCP registrar, registry HTTP handler, TTL sweep.                                                                                 |
+| `internal/quota/`      | Quota arithmetic and in-flight reservation. Shared by webhook and TenantQuota reconciler.                                        |
 | `internal/webhook/`    | Validating and mutating admission webhooks. Lives here (not `api/`) to import `internal/quota` without creating an import cycle. |
-| `internal/metrics/`    | Shared Prometheus client plumbing used by rollout and scaling.                            |
+| `internal/metrics/`    | Shared Prometheus client plumbing used by rollout and scaling.                                                                   |
 
 ## Where the hard logic lives
 
-- **`internal/rollout/`** — never evaluate `rollback` thresholds against a sample smaller than `minRequestSample`. A 10%-weight canary at low traffic produces statistically meaningless error rates; gate on sample size first.
+- **`internal/rollout/`** — never evaluate `rollback` thresholds against a sample smaller than `minRequestSample`. A 10%-weight canary at low traffic produces statistically meaningless error rates; gate on sample size first. Canary steps must include at least one terminal `setWeight: 100` step for full promotion. Range query windows must format to canonical Prometheus syntax (`5m`, `1h`, `30s`, no trailing `0s`).
 - **`internal/quota/`** — two concurrent near-limit creates can individually pass a read-then-write quota check but combined exceed it. Use an in-flight reservation (short-lived in-memory map, keyed by tenant), not a naive status read.
 - **`internal/registry/`** — registration requires a successful MCP-level `initialize` handshake, not just Kubernetes readiness. Entries carry a TTL/heartbeat; ungraceful termination (OOM-kill, node failure) skips the deletion event path entirely, so don't rely on it.
+- **`internal/metrics/`** — all Prometheus HTTP responses must be read with `io.LimitReader` (1 MiB ceiling) to protect against memory exhaustion.
+- **`internal/controller/`** — reconcilers consume MCP registry operations via the `AgentRegistrar` interface (`Register`, `Deregister`, `Heartbeat`) for test isolation without polluting production structs.
 - Finalizer ordering: deregister from MCP _before_ the `Service` is garbage collected. Controller-runtime's foreground deletion via finalizer is the enforcement mechanism, not best-effort.
 - Quota reduction: lowering `TenantQuota` below current usage sets an `OverQuota` condition and blocks new creates/scale-ups. Never forcibly delete existing resources.
 
