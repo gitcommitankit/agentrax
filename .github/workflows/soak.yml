@@ -31,3 +31,5 @@ jobs:
 
       - name: Run Autoscaling Soak Suite
         run: make test-e2e-soak
+        env:
+          SOAK_DURATION_MINUTES: ${{ github.event.inputs.soak_duration_minutes }}
