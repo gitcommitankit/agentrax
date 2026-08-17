@@ -66,9 +66,9 @@ manager:
   leaderElect: false
   # -- Bind address for metrics. Use ":8443" for HTTPS, ":8080" for HTTP, "0" to disable.
   metricsBindAddress: "0"
-  # -- Bind address for health/readiness probes.
-  healthProbeBindAddress: ":8081"
-  # -- Bind port for health/readiness probes (referenced by liveness/readiness probes).
+  # -- Serve metrics securely over HTTPS. Set to false for HTTP.
+  metricsSecure: true
+  # -- Bind port for health/readiness probes (used for container port, probes, and manager bind address).
   healthProbeBindPort: 8081
   # -- GPU resource name used for quota calculation.
   gpuResourceName: "nvidia.com/gpu"

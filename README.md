@@ -202,6 +202,11 @@ metadata:
 spec:
   image: ghcr.io/my-org/search-agent:v2.0.0
   tenantRef: team-search
+  replicas:
+    min: 1
+    max: 4
+    metric: queueDepth
+    target: 25
   rollout:
     strategy: Canary
     steps:

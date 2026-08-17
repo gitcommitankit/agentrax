@@ -235,6 +235,14 @@ func main() {
 		}
 	}
 
+	if mcpHealthInterval >= registryTTL {
+		setupLog.Info("AGENTRAX_MCP_HEALTH_INTERVAL must be strictly less than AGENTRAX_REGISTRY_TTL",
+			"configuredInterval", mcpHealthInterval,
+			"registryTTL", registryTTL,
+			"adjustedInterval", registryTTL/2)
+		mcpHealthInterval = registryTTL / 2
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,

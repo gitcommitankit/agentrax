@@ -40,8 +40,11 @@ spec:
             {{- if .Values.manager.leaderElect }}
             - --leader-elect
             {{- end }}
-            - --health-probe-bind-address={{ .Values.manager.healthProbeBindAddress | default ":8081" }}
+            - --health-probe-bind-address=:{{ .Values.manager.healthProbeBindPort | default 8081 }}
             - --metrics-bind-address={{ .Values.manager.metricsBindAddress | default "0" }}
+            {{- if hasKey .Values.manager "metricsSecure" }}
+            - --metrics-secure={{ .Values.manager.metricsSecure }}
+            {{- end }}
             - --registry-bind-address={{ .Values.registry.bindAddress | default ":9090" }}
             - --gpu-resource-name={{ .Values.manager.gpuResourceName | default "nvidia.com/gpu" }}
             {{- if .Values.prometheus.url }}
