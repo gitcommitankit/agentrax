@@ -219,21 +219,31 @@ func main() {
 
 	registryTTL := registry.DefaultTTL
 	if v := os.Getenv("AGENTRAX_REGISTRY_TTL"); v != "" {
-		if parsed, err := time.ParseDuration(v); err == nil && parsed >= time.Second {
-			registryTTL = parsed
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			setupLog.Error(err, "failed to parse AGENTRAX_REGISTRY_TTL, using default",
+				"value", v, "default", registry.DefaultTTL)
+		} else if parsed < time.Second {
+			setupLog.Error(errors.New("duration must be at least 1s"),
+				"sub-second AGENTRAX_REGISTRY_TTL rejected, using default",
+				"value", v, "default", registry.DefaultTTL)
 		} else {
-			setupLog.Error(err, "invalid or sub-second AGENTRAX_REGISTRY_TTL (< 1s), using default",
-				"default", registry.DefaultTTL)
+			registryTTL = parsed
 		}
 	}
 
 	mcpHealthInterval := 60 * time.Second
 	if v := os.Getenv("AGENTRAX_MCP_HEALTH_INTERVAL"); v != "" {
-		if parsed, err := time.ParseDuration(v); err == nil && parsed >= time.Second {
-			mcpHealthInterval = parsed
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			setupLog.Error(err, "failed to parse AGENTRAX_MCP_HEALTH_INTERVAL, using default",
+				"value", v, "default", mcpHealthInterval)
+		} else if parsed < time.Second {
+			setupLog.Error(errors.New("duration must be at least 1s"),
+				"sub-second AGENTRAX_MCP_HEALTH_INTERVAL rejected, using default",
+				"value", v, "default", mcpHealthInterval)
 		} else {
-			setupLog.Error(err, "invalid or sub-second AGENTRAX_MCP_HEALTH_INTERVAL (< 1s), using default",
-				"default", mcpHealthInterval)
+			mcpHealthInterval = parsed
 		}
 	}
 
