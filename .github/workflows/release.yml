@@ -42,8 +42,10 @@ jobs:
         id: meta
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
+          TAG_RAW=${TAG_NAME#v}
           echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "Building release for tag: ${TAG_NAME}"
+          echo "tag_raw=${TAG_RAW}" >> $GITHUB_OUTPUT
+          echo "Building release for tag: ${TAG_NAME} (raw: ${TAG_RAW})"
 
       - name: Build and Push Multi-Arch Docker Image
         uses: docker/build-push-action@v6
@@ -53,6 +55,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag_raw }}
             ghcr.io/${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
