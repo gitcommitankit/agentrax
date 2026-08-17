@@ -6,4 +6,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: ghcr.io/gitcommitankit/agentrax
-  newTag: latest
+  newTag: v0.1.0
