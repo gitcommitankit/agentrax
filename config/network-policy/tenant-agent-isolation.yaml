@@ -51,9 +51,11 @@ spec:
         - port: 8080
           protocol: TCP
   egress:
-    # Allow outbound to kube-apiserver on port 6443.
+    # Allow outbound to kube-apiserver via ClusterIP (port 443) and direct endpoint (port 6443).
     # Agents may call the Kubernetes API to discover services or use cluster tools.
     - ports:
+        - port: 443
+          protocol: TCP
         - port: 6443
           protocol: TCP
     # Allow CoreDNS resolution on UDP and TCP port 53.

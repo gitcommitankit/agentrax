@@ -89,16 +89,16 @@ flowchart TB
 
 The repository enforces strict directional boundaries to prevent circular dependencies and isolate business logic from Kubernetes plumbing:
 
-| Package                      | Scope & Responsibility                                                                          | Key Invariants                                                                                       |
-| ---------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `api/v1alpha1/`              | CRD type definitions, OpenAPI markers, schema validation rules, and status condition constants. | **Zero business logic**; only struct declarations and generated deep-copy methods.                   |
-| `internal/controller/`       | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes). Consumes subsystems via interfaces. |
-| `internal/quota/`            | Quota arithmetic and concurrency-safe in-flight reservation cache.                              | Pure arithmetic; mutex-guarded state map; zero direct API server network calls in calculation paths. |
-| `internal/webhook/`          | Validating and Mutating admission webhooks.                                                     | Shared with `internal/quota` to enforce admission rules before objects are persisted.                |
-| `internal/scaling/`          | HPA synthesis, velocity rules, and dynamic quota ceiling headroom.                              | Calculates `QuotaHeadroom()` to cap HPA `maxReplicas` and applies stabilization windows.             |
-| `internal/rollout/`          | Canary state machine, PromQL query construction, and threshold evaluation.                      | Re-entrant state machine; sample-size gating; fail-safe timeout evaluation.                          |
-| `internal/registry/`         | MCP registrar, JSON-RPC 2.0 handshake, TTL sweeper, and discovery REST API.                     | In-memory registry with ConfigMap write-through for persistence; background health probes and TTL sweep. Explicitly allowed to write the `agentrax-registry` ConfigMap for state recovery. |
-| `internal/metrics/`          | Bounded HTTP Prometheus query client.                                                           | Wraps all responses with `io.LimitReader` (1 MiB ceiling) to prevent memory exhaustion.              |
+| Package                | Scope & Responsibility                                                                          | Key Invariants                                                                                                                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `api/v1alpha1/`        | CRD type definitions, OpenAPI markers, schema validation rules, and status condition constants. | **Zero business logic**; only struct declarations and generated deep-copy methods.                                                                                                         |
+| `internal/controller/` | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes). Consumes subsystems via interfaces.                    |
+| `internal/quota/`      | Quota arithmetic and concurrency-safe in-flight reservation cache.                              | Pure arithmetic; mutex-guarded state map; zero direct API server network calls in calculation paths.                                                                                       |
+| `internal/webhook/`    | Validating and Mutating admission webhooks.                                                     | Shared with `internal/quota` to enforce admission rules before objects are persisted.                                                                                                      |
+| `internal/scaling/`    | HPA synthesis, velocity rules, and dynamic quota ceiling headroom.                              | Calculates `QuotaHeadroom()` to cap HPA `maxReplicas` and applies stabilization windows.                                                                                                   |
+| `internal/rollout/`    | Canary state machine, PromQL query construction, and threshold evaluation.                      | Re-entrant state machine; sample-size gating; fail-safe timeout evaluation.                                                                                                                |
+| `internal/registry/`   | MCP registrar, JSON-RPC 2.0 handshake, TTL sweeper, and discovery REST API.                     | In-memory registry with ConfigMap write-through for persistence; background health probes and TTL sweep. Explicitly allowed to write the `agentrax-registry` ConfigMap for state recovery. |
+| `internal/metrics/`    | Bounded HTTP Prometheus query client.                                                           | Wraps all responses with `io.LimitReader` (1 MiB ceiling) to prevent memory exhaustion.                                                                                                    |
 
 ---
 
@@ -319,19 +319,35 @@ When an `AgentDeployment` is deleted, Kubernetes sets `metadata.deletionTimestam
 5. Kubernetes GC cascade deletes child resources (Deployment, Service, HPA, Route)
 ```
 
-**Invariant**: MCP deregistration MUST complete _before_ the child `Service` is garbage collected, ensuring external clients never encounter dead routing endpoints.
+### 4.6 Zero-Trust Multi-Tenant Network Isolation
+
+Agentrax enforces a zero-trust network perimeter around all AI agent workloads running in `tenant-*` namespaces. Because autonomous agents dynamically execute tools via MCP and consume cluster resources, flat Kubernetes networking presents severe security risks (unauthorized inter-tenant access, data exfiltration, and lateral movement).
+
+Agentrax maintains a **two-tier network policy model**:
+
+| Policy Manifest               | Target Namespace  | Scope & Responsibility                                                                                                                                                     |
+| :---------------------------- | :---------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow-metrics-traffic.yaml`  | `agentrax-system` | Protects the operator process; allows Prometheus to scrape `/metrics` on port `:8443`/`:8080`.                                                                                   |
+| `tenant-agent-isolation.yaml` | Every `tenant-*`  | Isolates agent pods; enforces default-deny on ingress/egress, strictly whitelisting only metrics scraping (`:8080`), Kubernetes API server (`:443`/`:6443`), and CoreDNS (`:53`). |
+
+#### Ingress & Egress Invariants:
+
+- **Ingress**: Only TCP port `8080` from namespaces labeled `monitoring: enabled` (Prometheus metric scraping).
+- **Egress**: Only TCP ports `443`/`6443` (`kube-apiserver`) and UDP/TCP port `53` (`CoreDNS`). All other outbound egress (cross-tenant, external internet) is blocked at the CNI layer.
+- **Label Selector Binding**: The `tenant-agent-isolation` policy selects pods dynamically via `agentrax.io/agent: "true"`. The `AgentDeploymentReconciler` automatically stamps this label into the `PodTemplateSpec` of every managed `Deployment` via `agentLabels()`.
 
 ---
 
 ## 5. Architectural Decision Records (ADRs) & Trade-Offs
 
-| Decision                                | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                   |
-| --------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Gateway API (`HTTPRoute`)**           | Istio `VirtualService` / Ingress Annotations | Istio requires a heavy service-mesh control plane and sidecar injection. Ingress annotations lack standardized multi-backend weighted traffic splits. Gateway API provides a lightweight, vendor-neutral standard for traffic shifting.                              |
-| **Custom Canary Rollout Engine**        | Argo Rollouts / Flagger                      | Generic rollout tools treat metric anomalies as pure percentages without low-traffic statistical gating (`minRequestSample`). Building an embedded, re-entrant state machine allowed us to guarantee sample-size gating and MCP tool re-registration upon promotion. |
-| **Native HPA via Custom Metrics**       | KEDA (`ScaledObject`)                        | KEDA is powerful but adds external CRD dependencies. Generating native Kubernetes `HorizontalPodAutoscaler` objects tied to the Prometheus Adapter custom metrics pipeline minimized dependencies while giving full control over stabilization windows.              |
-| **Embedded Registry + ConfigMap Store** | Dedicated etcd / Redis / Database            | Adding a dedicated database for service discovery increases operator operational complexity. The in-operator HTTP server with ConfigMap write-through store provides simple, robust storage for hundreds of agent services with cold-restart recovery.               |
-| **Go (`controller-runtime`)**           | Python (`Kopf`)                              | Go provides native compile-time safety, seamless alignment with Kubernetes upstream libraries, and access to `setup-envtest` for isolated in-process integration testing.                                                                                            |
+| Decision                                | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |
+| --------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Gateway API (`HTTPRoute`)**           | Istio `VirtualService` / Ingress Annotations | Istio requires a heavy service-mesh control plane and sidecar injection. Ingress annotations lack standardized multi-backend weighted traffic splits. Gateway API provides a lightweight, vendor-neutral standard for traffic shifting.                                  |
+| **Custom Canary Rollout Engine**        | Argo Rollouts / Flagger                      | Generic rollout tools treat metric anomalies as pure percentages without low-traffic statistical gating (`minRequestSample`). Building an embedded, re-entrant state machine allowed us to guarantee sample-size gating and MCP tool re-registration upon promotion.     |
+| **Native HPA via Custom Metrics**       | KEDA (`ScaledObject`)                        | KEDA is powerful but adds external CRD dependencies. Generating native Kubernetes `HorizontalPodAutoscaler` objects tied to the Prometheus Adapter custom metrics pipeline minimized dependencies while giving full control over stabilization windows.                  |
+| **Embedded Registry + ConfigMap Store** | Dedicated etcd / Redis / Database            | Adding a dedicated database for service discovery increases operator operational complexity. The in-operator HTTP server with ConfigMap write-through store provides simple, robust storage for hundreds of agent services with cold-restart recovery.                   |
+| **Two-Tier NetworkPolicy**              | Istio / Linkerd Service Mesh                 | Service mesh requires sidecar injection and significant control plane memory overhead. Native Kubernetes NetworkPolicy with label-selector binding (`agentrax.io/agent: "true"`) provides lightweight, CNI-enforced zero-trust tenant isolation with default-deny rules. |
+| **Go (`controller-runtime`)**           | Python (`Kopf`)                              | Go provides native compile-time safety, seamless alignment with Kubernetes upstream libraries, and access to `setup-envtest` for isolated in-process integration testing.                                                                                                |
 
 ---
 
