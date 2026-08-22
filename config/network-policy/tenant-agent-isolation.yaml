@@ -1,0 +1,65 @@
+---
+# Tenant Agent Isolation NetworkPolicy
+#
+# Purpose: Restricts agent pods across tenant namespaces, enforcing zero-trust
+#          isolation between tenants and preventing unauthorized outbound traffic.
+#
+# Selector: Matches all pods labelled `agentrax.io/agent: "true"`.
+#           The AgentDeployment reconciler sets this label on every pod template
+#           it manages, so this policy applies to all managed agent pods.
+#
+# Ingress rules:
+#   - Allow Prometheus to scrape metrics on port 8080 from namespaces
+#     labelled `monitoring: enabled` (kube-prometheus-stack namespace).
+#
+# Egress rules:
+#   - Allow egress to kube-apiserver on port 6443 (required for agent-to-API
+#     communication and tool-calling via the Kubernetes API).
+#   - Allow CoreDNS lookups on port 53 (UDP and TCP) for service discovery
+#     within the cluster.
+#   - All other egress (internet, cross-tenant) is denied by default.
+#
+# Usage: Apply this manifest to every tenant namespace:
+#   kubectl apply -n tenant-<name> -f tenant-agent-isolation.yaml
+#
+# Note: This policy does NOT apply to the agentrax-system namespace (operator pods).
+#       The operator namespace is protected by allow-metrics-traffic.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-agent-isolation
+  labels:
+    app.kubernetes.io/name: agentrax
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Select all pods carrying the agentrax.io/agent=true label.
+  # This label is set by agentLabels() in the AgentDeployment reconciler.
+  podSelector:
+    matchLabels:
+      agentrax.io/agent: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Prometheus to scrape /metrics on port 8080.
+    # Prometheus Operator runs in a namespace labelled `monitoring: enabled`.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              monitoring: enabled
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Allow outbound to kube-apiserver on port 6443.
+    # Agents may call the Kubernetes API to discover services or use cluster tools.
+    - ports:
+        - port: 6443
+          protocol: TCP
+    # Allow CoreDNS resolution on UDP and TCP port 53.
+    # Without this, service name lookups fail and MCP tool endpoints are unreachable.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
