@@ -240,7 +240,8 @@ func TestDesiredService_ClusterIPType(t *testing.T) {
 
 // ── agentLabels ───────────────────────────────────────────────────────────────
 
-// TestAgentLabels verifies standard label generation for an AgentDeployment.
+// TestAgentLabels verifies standard label generation for an AgentDeployment,
+// including the agentrax.io/agent selector key used by NetworkPolicies.
 func TestAgentLabels(t *testing.T) {
 	ad := &agentraxv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
@@ -252,7 +253,14 @@ func TestAgentLabels(t *testing.T) {
 		"app.kubernetes.io/name":       "foo",
 		"app.kubernetes.io/managed-by": "agentrax",
 		"agentrax.io/tenant":           "bar",
+		"agentrax.io/variant":          "stable",
+		"agentrax.io/agent":            "true",
 	}
+
+	if len(labels) != len(expected) {
+		t.Errorf("expected %d labels, got %d: %v", len(expected), len(labels), labels)
+	}
+
 	for k, v := range expected {
 		if labels[k] != v {
 			t.Errorf("agentLabels[%s] = %q, want %q", k, labels[k], v)
