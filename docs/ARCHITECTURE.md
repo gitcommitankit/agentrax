@@ -92,7 +92,7 @@ The repository enforces strict directional boundaries to prevent circular depend
 | Package                | Scope & Responsibility                                                                          | Key Invariants                                                                                                                                                                             |
 | ---------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `api/v1alpha1/`        | CRD type definitions, OpenAPI markers, schema validation rules, and status condition constants. | **Zero business logic**; only struct declarations and generated deep-copy methods.                                                                                                         |
-| `internal/controller/` | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes). Consumes subsystems via interfaces.                    |
+| `internal/controller/` | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes, ServiceMonitors). Consumes subsystems via interfaces. |
 | `internal/quota/`      | Quota arithmetic and concurrency-safe in-flight reservation cache.                              | Pure arithmetic; mutex-guarded state map; zero direct API server network calls in calculation paths.                                                                                       |
 | `internal/webhook/`    | Validating and Mutating admission webhooks.                                                     | Shared with `internal/quota` to enforce admission rules before objects are persisted.                                                                                                      |
 | `internal/scaling/`    | HPA synthesis, velocity rules, and dynamic quota ceiling headroom.                              | Calculates `QuotaHeadroom()` to cap HPA `maxReplicas` and applies stabilization windows.                                                                                                   |
@@ -325,15 +325,15 @@ Agentrax enforces a zero-trust network perimeter around all AI agent workloads r
 
 Agentrax maintains a **two-tier network policy model**:
 
-| Policy Manifest               | Target Namespace  | Scope & Responsibility                                                                                                                                                     |
-| :---------------------------- | :---------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allow-metrics-traffic.yaml`  | `agentrax-system` | Protects the operator process; allows Prometheus to scrape `/metrics` on port `:8443`/`:8080`.                                                                                   |
+| Policy Manifest               | Target Namespace  | Scope & Responsibility                                                                                                                                                               |
+| :---------------------------- | :---------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow-metrics-traffic.yaml`  | `agentrax-system` | Protects the operator process; allows Prometheus to scrape operator `/metrics` on port `:8443` (HTTPS).                                                                              |
 | `tenant-agent-isolation.yaml` | Every `tenant-*`  | Isolates agent pods; enforces default-deny on ingress/egress, strictly whitelisting only metrics scraping (`:8080`), Kubernetes API server (`:443`/`:6443`), and CoreDNS (`:53`). |
 
 #### Ingress & Egress Invariants:
 
-- **Ingress**: Only TCP port `8080` from namespaces labeled `monitoring: enabled` (Prometheus metric scraping).
-- **Egress**: Only TCP ports `443`/`6443` (`kube-apiserver`) and UDP/TCP port `53` (`CoreDNS`). All other outbound egress (cross-tenant, external internet) is blocked at the CNI layer.
+- **Ingress**: Only TCP port `8080` from namespaces labeled `monitoring: enabled` (Prometheus scraping tenant agent metrics).
+- **Egress**: Only to the Kubernetes API server (`kube-apiserver` on TCP ports `443`/`6443`) and cluster CoreDNS (`UDP/TCP :53` in DNS pods). All cross-tenant and arbitrary external internet egress destinations remain blocked at the CNI layer.
 - **Label Selector Binding**: The `tenant-agent-isolation` policy selects pods dynamically via `agentrax.io/agent: "true"`. The `AgentDeploymentReconciler` automatically stamps this label into the `PodTemplateSpec` of every managed `Deployment` via `agentLabels()`.
 
 ---

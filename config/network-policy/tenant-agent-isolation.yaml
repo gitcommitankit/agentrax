@@ -22,8 +22,8 @@
 # Usage: Apply this manifest to every tenant namespace:
 #   kubectl apply -n tenant-<name> -f tenant-agent-isolation.yaml
 #
-# Note: This policy does NOT apply to the agentrax-system namespace (operator pods).
-#       The operator namespace is protected by allow-metrics-traffic.yaml.
+# Note: This policy applies only to tenant-* namespaces (managed agent pods).
+#       The operator namespace (agentrax-system) is protected by allow-metrics-traffic.yaml (TCP 8443).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -41,7 +41,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow Prometheus to scrape /metrics on port 8080.
+    # Allow Prometheus to scrape agent /metrics on port 8080.
     # Prometheus Operator runs in a namespace labelled `monitoring: enabled`.
     - from:
         - namespaceSelector:
@@ -59,8 +59,15 @@ spec:
         - port: 6443
           protocol: TCP
     # Allow CoreDNS resolution on UDP and TCP port 53.
-    # Without this, service name lookups fail and MCP tool endpoints are unreachable.
-    - ports:
+    # Matches cluster DNS pods in any namespace (e.g. kube-system).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchExpressions:
+              - key: k8s-app
+                operator: In
+                values: ["kube-dns", "coredns"]
+      ports:
         - port: 53
           protocol: UDP
         - port: 53

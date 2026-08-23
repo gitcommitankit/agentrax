@@ -20,7 +20,7 @@ description: Project context and settled architecture decisions for the Agentrax
 
 - **Autoscaling**: native `HorizontalPodAutoscaler` pointed at Prometheus Adapter custom metrics (`queueDepth` or `gpuUtilization`). No custom scaling loop. During active canary, the stable HPA is paused (deleted) and no canary HPA is created — autoscaling resumes only after promotion or rollback.
 - **Traffic splitting**: Gateway API `HTTPRoute` weighted backends. Not Istio, not ingress annotations.
-- **Network Isolation**: Two-tier Kubernetes `NetworkPolicy` (Operator in `agentrax-system`, tenant pods in `tenant-*` selected by `agentrax.io/agent: "true"`). No service mesh.
+- **Network Isolation**: Two-tier Kubernetes `NetworkPolicy` (`allow-metrics-traffic` in `agentrax-system` allowing operator metrics on TCP 8443; `tenant-agent-isolation` rendered into every `tenant-*` namespace selecting agent pods with `agentrax.io/agent: "true"` for scraping on TCP 8080 and egress to API server/CoreDNS). No service mesh.
 - **MCP registry**: embedded HTTP handler inside the operator process, backed by a `ConfigMap`. Not a separate Deployment, not a new database — HA storage is a v2 item.
 - **Non-goals**: no model training/fine-tuning, no general-purpose workload management, no service mesh, no UI in v1. Flag any drift toward these rather than quietly implementing them.
 
