@@ -659,12 +659,15 @@ func (r *AgentDeploymentReconciler) reconcileMCPRegistration(ctx context.Context
 
 // agentLabels returns the canonical label set applied to all resources owned by ad.
 // For stable resources (Deployment, Service), this includes variant=stable.
+// The agentrax.io/agent label is the NetworkPolicy selector key — all agent pod
+// templates carry it so the tenant-agent-isolation policy applies automatically.
 func agentLabels(ad *agentraxv1alpha1.AgentDeployment) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       ad.Name,
 		"app.kubernetes.io/managed-by": "agentrax",
 		"agentrax.io/tenant":           ad.Spec.TenantRef,
 		"agentrax.io/variant":          "stable",
+		"agentrax.io/agent":            "true",
 	}
 }
 
