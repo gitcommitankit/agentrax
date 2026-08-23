@@ -136,12 +136,18 @@ var _ = Describe("TenantQuota Controller", func() {
 				g.Expect(fetched.Status.UsedAgents).To(BeNumerically("==", 1))
 			}, timeout, interval).Should(Succeed())
 
-			// Remove finalizer so we can delete immediately.
-			fetched := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, namespacedName("ad-del-1", tqNS), fetched)).To(Succeed())
-			fetched.Finalizers = nil
-			Expect(k8sClient.Update(ctx, fetched)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, fetched)).To(Succeed())
+			// Remove finalizer with conflict retry so deletion is not raced by the controller.
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, namespacedName("ad-del-1", tqNS), latest); err != nil {
+					return err
+				}
+				latest.Finalizers = nil
+				return k8sClient.Update(ctx, latest)
+			})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &agentraxv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "ad-del-1", Namespace: tqNS},
+			})).To(Succeed())
 
 			Eventually(func(g Gomega) {
 				tqFetched := &agentraxv1alpha1.TenantQuota{}
@@ -217,11 +223,17 @@ var _ = Describe("TenantQuota Controller", func() {
 			}, timeout, interval).Should(Succeed())
 
 			// Delete one AD → usage falls back to 1 == maxAgents; OverQuota clears.
-			ad1 := &agentraxv1alpha1.AgentDeployment{}
-			Expect(k8sClient.Get(ctx, namespacedName("ad-clearoq-1", tqNS), ad1)).To(Succeed())
-			ad1.Finalizers = nil
-			Expect(k8sClient.Update(ctx, ad1)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, ad1)).To(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &agentraxv1alpha1.AgentDeployment{}
+				if err := k8sClient.Get(ctx, namespacedName("ad-clearoq-1", tqNS), latest); err != nil {
+					return err
+				}
+				latest.Finalizers = nil
+				return k8sClient.Update(ctx, latest)
+			})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &agentraxv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "ad-clearoq-1", Namespace: tqNS},
+			})).To(Succeed())
 
 			Eventually(func(g Gomega) {
 				f := &agentraxv1alpha1.TenantQuota{}

@@ -59,9 +59,11 @@ spec:
         - port: 6443
           protocol: TCP
     # Allow CoreDNS resolution on UDP and TCP port 53.
-    # Matches cluster DNS pods in any namespace (e.g. kube-system).
+    # Matches cluster DNS pods in the kube-system namespace.
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
           podSelector:
             matchExpressions:
               - key: k8s-app

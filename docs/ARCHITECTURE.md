@@ -333,7 +333,7 @@ Agentrax maintains a **two-tier network policy model**:
 #### Ingress & Egress Invariants:
 
 - **Ingress**: Only TCP port `8080` from namespaces labeled `monitoring: enabled` (Prometheus scraping tenant agent metrics).
-- **Egress**: Only to the Kubernetes API server (`kube-apiserver` on TCP ports `443`/`6443`) and cluster CoreDNS (`UDP/TCP :53` in DNS pods). All cross-tenant and arbitrary external internet egress destinations remain blocked at the CNI layer.
+- **Egress**: Only to the Kubernetes API server (`kube-apiserver` on TCP ports `443`/`6443`) and cluster CoreDNS (`UDP/TCP :53` in `kube-system` DNS pods). All cross-tenant and arbitrary external internet egress destinations remain blocked at the CNI layer.
 - **Label Selector Binding**: The `tenant-agent-isolation` policy selects pods dynamically via `agentrax.io/agent: "true"`. The `AgentDeploymentReconciler` automatically stamps this label into the `PodTemplateSpec` of every managed `Deployment` via `agentLabels()`.
 
 ---
