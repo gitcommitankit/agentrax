@@ -104,6 +104,21 @@ mcp:
   # -- Periodic health check interval for registered agents (e.g. "30s")
   healthInterval: "30s"
 
+# -- Cloud Workload Identity — secretless pod-level IAM.
+# Supported providers: azure (AKS Workload Identity), aws (EKS IRSA).
+# When disabled (the default), no annotations or labels are injected.
+workloadIdentity:
+  # -- Set to true to enable workload identity for the controller-manager pod.
+  enabled: false
+  # -- Cloud provider. Accepted values: "azure" | "aws".
+  provider: azure
+  # -- Azure only: Application (client) ID of the managed identity.
+  azureClientId: ""
+  # -- Azure only: Azure AD tenant ID.
+  azureTenantId: ""
+  # -- AWS only: Full ARN of the IAM role to assume via IRSA.
+  awsRoleArn: ""
+
 # -- Environment variables injected into the manager container.
 # These values are automatically populated from registry.ttl and mcp.healthInterval above.
 env: {}
