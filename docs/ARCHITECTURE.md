@@ -338,6 +338,48 @@ Agentrax maintains a **two-tier network policy model**:
 
 ---
 
+### 4.7 Keyless Cloud IAM — Workload Identity
+
+Agentrax requires cloud API access (e.g., Azure Container Registry pulls, AWS Secrets Manager reads) in production. Static credentials baked into `Secret` objects rotate manually, are visible in etcd, and create a long-lived blast radius if leaked.
+
+The operator is instead bound to a cloud-managed identity at the pod level:
+
+| Cloud   | Mechanism                       | How it works                                                                                                                           |
+| :------ | :------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------- |
+| **Azure** (AKS) | Azure Workload Identity        | An OIDC-projected service account token is exchanged for a short-lived Azure AD access token by the Azure Identity SDK. The AKS admission webhook injects the projected volume and `AZURE_*` env vars when the pod carries `azure.workload.identity/use: "true"`. |
+| **AWS** (EKS)   | IRSA (IAM Roles for SA) | EKS projects a signed OIDC token into the pod; the AWS SDK exchanges it for temporary STS credentials scoped to the bound IAM role via `eks.amazonaws.com/role-arn` annotation. |
+
+#### Helm Configuration
+
+Workload identity is off by default. Enable it via `values.yaml` or `--set`:
+
+```yaml
+# Azure AKS
+workloadIdentity:
+  enabled: true
+  provider: azure
+  azureClientId: "<managed-identity-client-id>"
+  azureTenantId: "<azure-ad-tenant-id>"
+
+# AWS EKS
+workloadIdentity:
+  enabled: true
+  provider: aws
+  awsRoleArn: "arn:aws:iam::<account>:role/<role-name>"
+```
+
+When `workloadIdentity.enabled=true`:
+
+- **Azure**: The `ServiceAccount` gains `azure.workload.identity/client-id` and `azure.workload.identity/tenant-id` annotations; the manager pod gains the `azure.workload.identity/use: "true"` label required by the AKS mutating webhook.
+- **AWS**: The `ServiceAccount` gains the `eks.amazonaws.com/role-arn` annotation consumed by the EKS pod identity webhook. For Kustomize-based cluster overlays, use `config/workload-identity/irsa-serviceaccount.yaml` as a strategic-merge patch.
+
+#### Invariants
+
+- No static cloud credentials (`client_secret`, `AWS_SECRET_ACCESS_KEY`) are ever stored in cluster `Secret` objects.
+- `workloadIdentity.enabled=false` (the default) renders no identity annotations or pod labels — the chart remains fully portable to on-premises or non-cloud environments.
+
+---
+
 ## 5. Architectural Decision Records (ADRs) & Trade-Offs
 
 | Decision                                | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |
@@ -347,6 +389,7 @@ Agentrax maintains a **two-tier network policy model**:
 | **Native HPA via Custom Metrics**       | KEDA (`ScaledObject`)                        | KEDA is powerful but adds external CRD dependencies. Generating native Kubernetes `HorizontalPodAutoscaler` objects tied to the Prometheus Adapter custom metrics pipeline minimized dependencies while giving full control over stabilization windows.                  |
 | **Embedded Registry + ConfigMap Store** | Dedicated etcd / Redis / Database            | Adding a dedicated database for service discovery increases operator operational complexity. The in-operator HTTP server with ConfigMap write-through store provides simple, robust storage for hundreds of agent services with cold-restart recovery.                   |
 | **Two-Tier NetworkPolicy**              | Istio / Linkerd Service Mesh                 | Service mesh requires sidecar injection and significant control plane memory overhead. Native Kubernetes NetworkPolicy with label-selector binding (`agentrax.io/agent: "true"`) provides lightweight, CNI-enforced zero-trust tenant isolation with default-deny rules. |
+| **Workload Identity (no static secrets)** | Kubernetes `Secret` with cloud credentials | Static credentials require manual rotation, are stored in etcd, and present a wide blast radius on leak. OIDC-projected pod tokens (Azure Workload Identity / AWS IRSA) are short-lived, auto-rotated, and scoped to a single identity.                              |
 | **Go (`controller-runtime`)**           | Python (`Kopf`)                              | Go provides native compile-time safety, seamless alignment with Kubernetes upstream libraries, and access to `setup-envtest` for isolated in-process integration testing.                                                                                                |
 
 ---
