@@ -340,9 +340,9 @@ Agentrax maintains a **two-tier network policy model**:
 
 ### 4.7 Keyless Cloud IAM — Workload Identity
 
-Agentrax requires cloud API access (e.g., Azure Container Registry pulls, AWS Secrets Manager reads) in production. Static credentials baked into `Secret` objects rotate manually, are visible in etcd, and create a long-lived blast radius if leaked.
+Agentrax and managed agent pods often require cloud API access (e.g., Azure Key Vault, Azure OpenAI, AWS Secrets Manager) in production. Note that private container image pulls (such as ACR) are handled independently at the node layer via AKS Kubelet Managed Identity (with the `AcrPull` role) or Kubernetes `imagePullSecrets`, while Workload Identity specifically covers runtime cloud SDK calls originating from running pods.
 
-The operator is instead bound to a cloud-managed identity at the pod level:
+Static credentials baked into `Secret` objects rotate manually, are visible in etcd, and create a long-lived blast radius if leaked. The operator and tenant agents are instead bound to a cloud-managed identity at the pod level:
 
 | Cloud   | Mechanism                       | How it works                                                                                                                           |
 | :------ | :------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------- |
