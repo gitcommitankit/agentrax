@@ -168,6 +168,26 @@ check-metrics: ## Diagnostic: check whether custom metrics are available via the
 	$(KUBECTL) get --raw /apis/custom.metrics.k8s.io/v1beta1 2>/dev/null | python3 -m json.tool || \
 		echo "Custom metrics API not available — ensure Prometheus Adapter is running."
 
+##@ Terraform (Infrastructure)
+
+TF_DIR ?= infra/environments/dev
+
+.PHONY: terraform-init
+terraform-init: ## Initialise Terraform in the dev environment (downloads providers).
+	terraform -chdir=$(TF_DIR) init
+
+.PHONY: terraform-plan
+terraform-plan: ## Preview Terraform changes for the dev kind cluster.
+	terraform -chdir=$(TF_DIR) plan
+
+.PHONY: terraform-apply
+terraform-apply: ## Provision the dev kind cluster and deploy the full Agentrax stack.
+	terraform -chdir=$(TF_DIR) apply -auto-approve
+
+.PHONY: terraform-destroy
+terraform-destroy: ## Tear down the dev kind cluster and all provisioned resources.
+	terraform -chdir=$(TF_DIR) destroy -auto-approve
+
 ##@ Dependencies
 
 ## Location to install dependencies to

@@ -92,7 +92,7 @@ The repository enforces strict directional boundaries to prevent circular depend
 | Package                | Scope & Responsibility                                                                          | Key Invariants                                                                                                                                                                             |
 | ---------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `api/v1alpha1/`        | CRD type definitions, OpenAPI markers, schema validation rules, and status condition constants. | **Zero business logic**; only struct declarations and generated deep-copy methods.                                                                                                         |
-| `internal/controller/` | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes, ServiceMonitors). Consumes subsystems via interfaces. |
+| `internal/controller/` | Controller-runtime reconcile loops (`AgentDeployment`, `TenantQuota`).                          | Only layer that executes write calls against the Kubernetes API for core-owned resources (Deployments, Services, HPAs, HTTPRoutes, ServiceMonitors). Consumes subsystems via interfaces.   |
 | `internal/quota/`      | Quota arithmetic and concurrency-safe in-flight reservation cache.                              | Pure arithmetic; mutex-guarded state map; zero direct API server network calls in calculation paths.                                                                                       |
 | `internal/webhook/`    | Validating and Mutating admission webhooks.                                                     | Shared with `internal/quota` to enforce admission rules before objects are persisted.                                                                                                      |
 | `internal/scaling/`    | HPA synthesis, velocity rules, and dynamic quota ceiling headroom.                              | Calculates `QuotaHeadroom()` to cap HPA `maxReplicas` and applies stabilization windows.                                                                                                   |
@@ -325,9 +325,9 @@ Agentrax enforces a zero-trust network perimeter around all AI agent workloads r
 
 Agentrax maintains a **two-tier network policy model**:
 
-| Policy Manifest               | Target Namespace  | Scope & Responsibility                                                                                                                                                               |
-| :---------------------------- | :---------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allow-metrics-traffic.yaml`  | `agentrax-system` | Protects the operator process; allows Prometheus to scrape operator `/metrics` on port `:8443` (HTTPS).                                                                              |
+| Policy Manifest               | Target Namespace  | Scope & Responsibility                                                                                                                                                            |
+| :---------------------------- | :---------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow-metrics-traffic.yaml`  | `agentrax-system` | Protects the operator process; allows Prometheus to scrape operator `/metrics` on port `:8443` (HTTPS).                                                                           |
 | `tenant-agent-isolation.yaml` | Every `tenant-*`  | Isolates agent pods; enforces default-deny on ingress/egress, strictly whitelisting only metrics scraping (`:8080`), Kubernetes API server (`:443`/`:6443`), and CoreDNS (`:53`). |
 
 #### Ingress & Egress Invariants:
@@ -344,10 +344,10 @@ Agentrax and managed agent pods often require cloud API access (e.g., Azure Key 
 
 Static credentials baked into `Secret` objects rotate manually, are visible in etcd, and create a long-lived blast radius if leaked. The operator and tenant agents are instead bound to a cloud-managed identity at the pod level:
 
-| Cloud   | Mechanism                       | How it works                                                                                                                           |
-| :------ | :------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------- |
-| **Azure** (AKS) | Azure Workload Identity        | An OIDC-projected service account token is exchanged for a short-lived Azure AD access token by the Azure Identity SDK. The AKS admission webhook injects the projected volume and `AZURE_*` env vars when the pod carries `azure.workload.identity/use: "true"`. |
-| **AWS** (EKS)   | IRSA (IAM Roles for SA) | EKS projects a signed OIDC token into the pod; the AWS SDK exchanges it for temporary STS credentials scoped to the bound IAM role via `eks.amazonaws.com/role-arn` annotation. |
+| Cloud           | Mechanism               | How it works                                                                                                                                                                                                                                                      |
+| :-------------- | :---------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Azure** (AKS) | Azure Workload Identity | An OIDC-projected service account token is exchanged for a short-lived Azure AD access token by the Azure Identity SDK. The AKS admission webhook injects the projected volume and `AZURE_*` env vars when the pod carries `azure.workload.identity/use: "true"`. |
+| **AWS** (EKS)   | IRSA (IAM Roles for SA) | EKS projects a signed OIDC token into the pod; the AWS SDK exchanges it for temporary STS credentials scoped to the bound IAM role via `eks.amazonaws.com/role-arn` annotation.                                                                                   |
 
 #### Helm Configuration
 
@@ -380,17 +380,73 @@ When `workloadIdentity.enabled=true`:
 
 ---
 
+### 4.8 Infrastructure as Code — Terraform Module
+
+Agentrax ships a Terraform module under `infra/` that replaces the manual `make deploy-deps && make deploy` sequence with a single declarative apply. The module targets a local `kind` cluster for development and is designed to be re-used against an Azure AKS cluster in production.
+
+#### Directory Structure
+
+```
+infra/
+├── modules/
+│   ├── kind_cluster/        # kind cluster via tehcyx/kind provider
+│   │   ├── main.tf          # kind_cluster resource; exposes kubeconfig outputs
+│   │   ├── variables.tf
+│   │   └── outputs.tf       # kubeconfig, endpoint, client credentials
+│   └── agentrax_stack/      # cert-manager → kube-prometheus-stack → agentrax
+│       ├── main.tf          # three helm_release resources in dependency order
+│       ├── variables.tf
+│       └── outputs.tf
+└── environments/
+    ├── dev/                 # local kind — local backend, no shared state
+    │   ├── main.tf          # calls both modules; configures helm/kubernetes providers
+    │   ├── variables.tf
+    │   └── outputs.tf
+    └── prod/                # Azure AKS stub (remote backend, azurerm provider)
+        └── README.md
+```
+
+#### Dependency Order
+
+`cert-manager` must be ready before the `agentrax` webhook certificates can be issued. `kube-prometheus-stack` must be ready before canary rollout PromQL evaluation is live. Terraform `depends_on` chains enforce this strictly:
+
+```
+kind_cluster  →  helm_release.cert_manager  →  helm_release.kube_prometheus_stack  →  helm_release.agentrax
+```
+
+#### Developer Workflow
+
+```bash
+make terraform-init     # initialise providers
+make terraform-plan     # preview changes
+make terraform-apply    # provision cluster + full stack
+make terraform-destroy  # tear down everything
+```
+
+The default `TF_DIR` is `infra/environments/dev` and can be overridden: `make terraform-apply TF_DIR=infra/environments/prod`.
+
+#### CI Lint Gate
+
+The `.github/workflows/terraform-lint.yml` workflow runs on every PR touching `infra/**`:
+
+- `terraform fmt -check -recursive` — consistent formatting
+- `tflint --chdir=infra/environments/dev` — provider schema & naming rules (config: `infra/.tflint.hcl`)
+- `trivy config infra/` — IaC security scan (`HIGH`/`CRITICAL` findings fail the pipeline)
+
+---
+
 ## 5. Architectural Decision Records (ADRs) & Trade-Offs
 
-| Decision                                | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |
-| --------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Gateway API (`HTTPRoute`)**           | Istio `VirtualService` / Ingress Annotations | Istio requires a heavy service-mesh control plane and sidecar injection. Ingress annotations lack standardized multi-backend weighted traffic splits. Gateway API provides a lightweight, vendor-neutral standard for traffic shifting.                                  |
-| **Custom Canary Rollout Engine**        | Argo Rollouts / Flagger                      | Generic rollout tools treat metric anomalies as pure percentages without low-traffic statistical gating (`minRequestSample`). Building an embedded, re-entrant state machine allowed us to guarantee sample-size gating and MCP tool re-registration upon promotion.     |
-| **Native HPA via Custom Metrics**       | KEDA (`ScaledObject`)                        | KEDA is powerful but adds external CRD dependencies. Generating native Kubernetes `HorizontalPodAutoscaler` objects tied to the Prometheus Adapter custom metrics pipeline minimized dependencies while giving full control over stabilization windows.                  |
-| **Embedded Registry + ConfigMap Store** | Dedicated etcd / Redis / Database            | Adding a dedicated database for service discovery increases operator operational complexity. The in-operator HTTP server with ConfigMap write-through store provides simple, robust storage for hundreds of agent services with cold-restart recovery.                   |
-| **Two-Tier NetworkPolicy**              | Istio / Linkerd Service Mesh                 | Service mesh requires sidecar injection and significant control plane memory overhead. Native Kubernetes NetworkPolicy with label-selector binding (`agentrax.io/agent: "true"`) provides lightweight, CNI-enforced zero-trust tenant isolation with default-deny rules. |
-| **Workload Identity (no static secrets)** | Kubernetes `Secret` with cloud credentials | Static credentials require manual rotation, are stored in etcd, and present a wide blast radius on leak. OIDC-projected pod tokens (Azure Workload Identity / AWS IRSA) are short-lived, auto-rotated, and scoped to a single identity.                              |
-| **Go (`controller-runtime`)**           | Python (`Kopf`)                              | Go provides native compile-time safety, seamless alignment with Kubernetes upstream libraries, and access to `setup-envtest` for isolated in-process integration testing.                                                                                                |
+| Decision                                  | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |
+| ----------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Gateway API (`HTTPRoute`)**             | Istio `VirtualService` / Ingress Annotations | Istio requires a heavy service-mesh control plane and sidecar injection. Ingress annotations lack standardized multi-backend weighted traffic splits. Gateway API provides a lightweight, vendor-neutral standard for traffic shifting.                                  |
+| **Custom Canary Rollout Engine**          | Argo Rollouts / Flagger                      | Generic rollout tools treat metric anomalies as pure percentages without low-traffic statistical gating (`minRequestSample`). Building an embedded, re-entrant state machine allowed us to guarantee sample-size gating and MCP tool re-registration upon promotion.     |
+| **Native HPA via Custom Metrics**         | KEDA (`ScaledObject`)                        | KEDA is powerful but adds external CRD dependencies. Generating native Kubernetes `HorizontalPodAutoscaler` objects tied to the Prometheus Adapter custom metrics pipeline minimized dependencies while giving full control over stabilization windows.                  |
+| **Embedded Registry + ConfigMap Store**   | Dedicated etcd / Redis / Database            | Adding a dedicated database for service discovery increases operator operational complexity. The in-operator HTTP server with ConfigMap write-through store provides simple, robust storage for hundreds of agent services with cold-restart recovery.                   |
+| **Two-Tier NetworkPolicy**                | Istio / Linkerd Service Mesh                 | Service mesh requires sidecar injection and significant control plane memory overhead. Native Kubernetes NetworkPolicy with label-selector binding (`agentrax.io/agent: "true"`) provides lightweight, CNI-enforced zero-trust tenant isolation with default-deny rules. |
+| **Workload Identity (no static secrets)** | Kubernetes `Secret` with cloud credentials   | Static credentials require manual rotation, are stored in etcd, and present a wide blast radius on leak. OIDC-projected pod tokens (Azure Workload Identity / AWS IRSA) are short-lived, auto-rotated, and scoped to a single identity.                                  |
+| **Terraform Modules for IaC**             | Raw shell scripts / `make deploy-deps`       | Shell scripts are non-idempotent and hard to parameterise. Terraform modules enforce dependency order, enable plan/apply/destroy lifecycle, support multiple environments (dev/prod), and integrate natively with CI IaC scanning tools (tflint, trivy).                 |
+| **Go (`controller-runtime`)**             | Python (`Kopf`)                              | Go provides native compile-time safety, seamless alignment with Kubernetes upstream libraries, and access to `setup-envtest` for isolated in-process integration testing.                                                                                                |
 
 ---
 
