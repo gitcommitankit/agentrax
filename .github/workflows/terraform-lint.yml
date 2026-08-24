@@ -39,7 +39,7 @@ jobs:
         run: tflint --chdir=infra/environments/dev
 
       - name: Trivy IaC Scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: config
           scan-ref: infra/
