@@ -181,12 +181,12 @@ terraform-plan: ## Preview Terraform changes for the dev kind cluster.
 	terraform -chdir=$(TF_DIR) plan
 
 .PHONY: terraform-apply
-terraform-apply: ## Provision the dev kind cluster and deploy the full Agentrax stack.
-	terraform -chdir=$(TF_DIR) apply -auto-approve
+terraform-apply: ## Provision the dev kind cluster and deploy the full Agentrax stack. Set TF_AUTO_APPROVE=1 to skip confirmation prompt.
+	terraform -chdir=$(TF_DIR) apply $(if $(TF_AUTO_APPROVE),-auto-approve)
 
 .PHONY: terraform-destroy
-terraform-destroy: ## Tear down the dev kind cluster and all provisioned resources.
-	terraform -chdir=$(TF_DIR) destroy -auto-approve
+terraform-destroy: ## Tear down the dev kind cluster and all provisioned resources. Set TF_AUTO_APPROVE=1 to skip confirmation prompt.
+	terraform -chdir=$(TF_DIR) destroy $(if $(TF_AUTO_APPROVE),-auto-approve)
 
 ##@ Dependencies
 

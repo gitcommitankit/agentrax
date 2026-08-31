@@ -382,7 +382,7 @@ When `workloadIdentity.enabled=true`:
 
 ### 4.8 Infrastructure as Code — Terraform Module
 
-Agentrax ships a Terraform module under `infra/` that replaces the manual `make deploy-deps && make deploy` sequence with a single declarative apply. The module targets a local `kind` cluster for development and is designed to be re-used against an Azure AKS cluster in production.
+Agentrax ships a Terraform module under `infra/` that complements the existing `make deploy-deps && make deploy` workflow with a fully declarative apply. The module targets a local `kind` cluster for development and is designed to be re-used against an Azure AKS cluster in production once the `infra/environments/prod/` environment is implemented.
 
 #### Directory Structure
 
@@ -423,7 +423,7 @@ make terraform-apply    # provision cluster + full stack
 make terraform-destroy  # tear down everything
 ```
 
-The default `TF_DIR` is `infra/environments/dev` and can be overridden: `make terraform-apply TF_DIR=infra/environments/prod`.
+The default `TF_DIR` is `infra/environments/dev` and can be overridden: `make terraform-apply TF_DIR=infra/environments/prod` (once the prod environment is implemented; see `infra/environments/prod/README.md`).
 
 #### CI Lint Gate
 

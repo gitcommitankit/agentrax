@@ -31,15 +31,15 @@ jobs:
           tflint_version: "v0.53.0"
 
       - name: TFLint init
-        run: tflint --init --chdir=infra/environments/dev
+        run: tflint --init --config=infra/.tflint.hcl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: TFLint
-        run: tflint --chdir=infra/environments/dev
+        run: tflint --chdir=infra/environments/dev --config=$(pwd)/infra/.tflint.hcl
 
       - name: Trivy IaC Scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: infra/

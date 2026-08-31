@@ -22,16 +22,12 @@ resource "kind_cluster" "this" {
 
     node {
       role = "control-plane"
-
-      # Expose ports for the Agentrax discovery registry and Gateway API.
-      extra_port_mappings {
-        container_port = 9090
-        host_port      = 9090
-        protocol       = "TCP"
-      }
     }
 
     # Additional worker node gives the scheduler headroom for agent pods.
+    # The agentrax operator (including the MCP registry on :9090) runs on the
+    # worker node. Access the registry locally via:
+    #   kubectl port-forward -n agentrax-system svc/agentrax-mcp-registry 9090:9090
     node {
       role = "worker"
     }
