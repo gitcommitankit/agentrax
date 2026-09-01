@@ -7,7 +7,7 @@ This environment targets an Azure Kubernetes Service (AKS) cluster for productio
 3. **High Availability**: `agentrax_leader_elect = true` with $\ge 2$ controller replicas.
 4. **Workload Identity**: Cloud identity parameters passed via `agentrax_extra_values`.
 
-### Activation Runbook (Future — Not Yet Implemented)
+## Activation Runbook (Future — Not Yet Implemented)
 
 > [!NOTE]
 > The `infra/environments/prod/` directory is a stub. No `main.tf` exists here yet. The steps below are guidance for when the production Terraform root module is implemented.

@@ -36,7 +36,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: TFLint
-        run: tflint --chdir=infra/environments/dev --config=$(pwd)/infra/.tflint.hcl
+        run: tflint --chdir=infra/environments/dev --config="$(pwd)/infra/.tflint.hcl"
 
       - name: Trivy IaC Scan
         uses: aquasecurity/trivy-action@v0.36.0
