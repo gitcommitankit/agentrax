@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/observability"
 	"github.com/gitcommitankit/agentrax/internal/quota"
 )
 
@@ -99,6 +100,16 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	latest.Status.UsedAgents = usage.UsedAgents
 	latest.Status.UsedGPUs = usage.UsedGPUs
 	latest.Status.UsedTotalReplicas = usage.UsedTotalReplicas
+
+	// Emit quota usage ratio metric so Grafana and alerting rules can track
+	// how close this tenant is to its replica ceiling in real time.
+	// Guard against divide-by-zero: if MaxTotalReplicas is zero the ratio is 0.
+	if latest.Spec.MaxTotalReplicas > 0 {
+		ratio := float64(usage.UsedTotalReplicas) / float64(latest.Spec.MaxTotalReplicas)
+		observability.QuotaUsageRatio.WithLabelValues(latest.Name).Set(ratio)
+	} else {
+		observability.QuotaUsageRatio.WithLabelValues(latest.Name).Set(0)
+	}
 
 	// 5. Set or clear the OverQuota condition based on whether usage exceeds spec.
 	// Use latest.Spec (re-fetched) rather than tq.Spec (first fetch) to avoid

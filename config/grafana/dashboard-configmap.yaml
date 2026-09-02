@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentrax-grafana-dashboard
+  namespace: agentrax-system
+  labels:
+    app.kubernetes.io/name: agentrax
+    app.kubernetes.io/component: grafana-dashboard
+    # kube-prometheus-stack's Grafana sidecar watches for this label and
+    # auto-imports the JSON payload below as a Grafana dashboard.
+    grafana_dashboard: "1"
+data:
+  agentrax-dashboard.json: |
+    {
+      "title": "Agentrax Operator — RED Dashboard",
+      "uid": "agentrax-red",
+      "tags": ["agentrax", "operator", "kubernetes"],
+      "timezone": "browser",
+      "schemaVersion": 38,
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "tenant",
+            "label": "Tenant",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(agentrax_tenant_quota_usage_ratio, tenant)",
+            "includeAll": true,
+            "allValue": ".*",
+            "refresh": 1,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Rate — Reconcile Operations / sec",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(rate(agentrax_reconcile_duration_seconds_count[5m])) by (tenant)",
+              "legendFormat": "{{ tenant }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Errors — Reconcile Error Rate / sec",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(rate(controller_runtime_reconcile_errors_total{controller=\"agentdeployment\"}[5m]))",
+              "legendFormat": "errors/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "fixedColor": "red", "mode": "fixed" },
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Duration — Reconcile P99 Latency (seconds)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(agentrax_reconcile_duration_seconds_bucket[5m])) by (le, tenant))",
+              "legendFormat": "P99 {{ tenant }}"
+            },
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(agentrax_reconcile_duration_seconds_bucket[5m])) by (le, tenant))",
+              "legendFormat": "P50 {{ tenant }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "lineWidth": 2 },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 2 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "Quota — Tenant Replica Usage Ratio",
+          "type": "gauge",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "agentrax_tenant_quota_usage_ratio{tenant=~\"$tenant\"}",
+              "legendFormat": "{{ tenant }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.7 },
+                  { "color": "red", "value": 0.9 }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }

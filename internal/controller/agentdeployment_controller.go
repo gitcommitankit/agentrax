@@ -43,6 +43,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/observability"
 	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/rollout"
 	"github.com/gitcommitankit/agentrax/internal/scaling"
@@ -125,6 +126,16 @@ type AgentDeploymentReconciler struct {
 // a ServiceMonitor as owned child resources, then updates status conditions.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Observe reconcile wall-clock duration on every exit path, including early
+	// returns, errors, and requeues. The tenant label uses the request namespace
+	// because each namespace maps 1:1 to a tenant in Agentrax.
+	start := time.Now()
+	defer func() {
+		observability.ReconcileDuration.
+			WithLabelValues("agentdeployment", req.Namespace).
+			Observe(time.Since(start).Seconds())
+	}()
 
 	// 1. Fetch the AgentDeployment; return immediately if it has been deleted.
 	ad := &agentraxv1alpha1.AgentDeployment{}
