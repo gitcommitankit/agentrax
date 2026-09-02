@@ -1,0 +1,168 @@
+// Agentrax — Declarative Jenkins CI/CD Pipeline
+//
+// Stages:
+//   1. Lint            — golangci-lint + Helm chart lint (parallel)
+//   2. Test            — unit & integration tests via envtest
+//   3. Docker Build    — build image tagged with short Git SHA, push on main
+//   4. Integration Test — deploy to kind test namespace, assert reconciliation
+//   5. Helm Deploy     — manual approval gate then helm upgrade --install
+//
+// Requirements:
+//   - Jenkins agent with label 'docker' and Docker-in-Docker socket access
+//   - Credentials: GHCR_USER (string), GHCR_TOKEN (secret text)
+//   - Jenkins Slack plugin configured for Slack notifications
+
+pipeline {
+  agent { label 'docker' }
+
+  environment {
+    // Go workspace inside the Jenkins workspace to avoid polluting $HOME
+    GOPATH     = "${WORKSPACE}/.go"
+    GOMODCACHE = "${WORKSPACE}/.go/pkg/mod"
+    // Image tag is the short Git SHA for traceability
+    IMAGE_TAG  = "${env.GIT_COMMIT?.take(8) ?: env.BUILD_NUMBER}"
+    IMAGE      = "ghcr.io/gitcommitankit/agentrax:${IMAGE_TAG}"
+    // Kubernetes namespace used exclusively for integration testing
+    TEST_NS    = "agentrax-jenkins-test"
+  }
+
+  options {
+    // Abort if the full pipeline exceeds 45 minutes
+    timeout(time: 45, unit: 'MINUTES')
+    // Keep the last 10 build logs; discard older ones to save disk space
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    // Prevent concurrent builds on the same branch to avoid races on the
+    // shared kind cluster used in Stage 4
+    disableConcurrentBuilds()
+    ansiColor('xterm')
+  }
+
+  stages {
+
+    // -----------------------------------------------------------------------
+    // Stage 1: Lint
+    // Runs golangci-lint and Helm chart lint in parallel.
+    // -----------------------------------------------------------------------
+    stage('Lint') {
+      parallel {
+        stage('Go Lint') {
+          steps {
+            sh 'make golangci-lint'
+            sh 'make lint'
+          }
+        }
+        stage('Helm Lint') {
+          steps {
+            sh 'helm lint charts/agentrax/'
+            sh 'helm template test charts/agentrax/ --debug > /dev/null'
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 2: Test
+    // Runs the full unit + envtest integration test suite.
+    // -----------------------------------------------------------------------
+    stage('Test') {
+      steps {
+        sh 'make envtest'
+        sh 'make test'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'cover.out', allowEmptyArchive: true
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 3: Docker Build
+    // Builds the operator image. Pushes to GHCR only on the main branch.
+    // -----------------------------------------------------------------------
+    stage('Docker Build') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'GHCR_USER',  variable: 'GHCR_USER'),
+          string(credentialsId: 'GHCR_TOKEN', variable: 'GHCR_TOKEN'),
+        ]) {
+          sh 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin'
+          sh "make docker-build IMG=${IMAGE}"
+          script {
+            if (env.BRANCH_NAME == 'main') {
+              sh "make docker-push IMG=${IMAGE}"
+            } else {
+              echo "Feature branch — image built but not pushed (branch=${env.BRANCH_NAME})."
+            }
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 4: Integration Test  (Agentrax-specific stage)
+    //
+    // 1. Installs cert-manager, Prometheus Operator CRDs, and Gateway API CRDs
+    //    via `make deploy-deps` (idempotent).
+    // 2. Deploys the operator into the cluster with the newly built image.
+    // 3. Runs hack/assert-reconciliation.sh — polls until a sample
+    //    AgentDeployment reaches status.phase == Running (60 s timeout).
+    //
+    // The post.always block tears down the test namespace so the cluster stays
+    // clean for the next build regardless of pass/fail.
+    // -----------------------------------------------------------------------
+    stage('Integration Test') {
+      steps {
+        sh 'make deploy-deps'
+        sh "make deploy IMG=${IMAGE}"
+        sh "TEST_NS=${TEST_NS} ./hack/assert-reconciliation.sh"
+      }
+      post {
+        always {
+          sh 'make undeploy || true'
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 5: Helm Deploy
+    //
+    // Runs only on the main branch. Requires explicit approval from the
+    // ops-team before mutating the production cluster. --atomic ensures Helm
+    // rolls back automatically if any post-install hook fails.
+    // -----------------------------------------------------------------------
+    stage('Helm Deploy') {
+      when { branch 'main' }
+      input {
+        message "Deploy agentrax:${IMAGE_TAG} to production cluster?"
+        ok 'Approve'
+        submitter 'ops-team'
+      }
+      steps {
+        sh """
+          helm upgrade --install agentrax charts/agentrax/ \
+            --namespace agentrax-system \
+            --create-namespace \
+            --set image.tag=${IMAGE_TAG} \
+            --atomic \
+            --timeout 5m
+        """
+      }
+    }
+  }
+
+  post {
+    failure {
+      slackSend(
+        color: 'danger',
+        message: "❌ Agentrax build #${BUILD_NUMBER} FAILED on \`${BRANCH_NAME}\`: ${BUILD_URL}",
+      )
+    }
+    success {
+      slackSend(
+        color: 'good',
+        message: "✅ Agentrax build #${BUILD_NUMBER} passed on \`${BRANCH_NAME}\` (image: \`${IMAGE_TAG}\`)",
+      )
+    }
+  }
+}

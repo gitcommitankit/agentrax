@@ -1,0 +1,21 @@
+apiVersion: agentrax.io/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: jenkins-smoke-test
+  # Namespace is set by assert-reconciliation.sh at apply time (-n ${TEST_NS})
+  labels:
+    app.kubernetes.io/managed-by: jenkins-ci
+    agentrax.io/agent: "true"
+spec:
+  # Minimal agent that exercises the full reconcile loop:
+  # Deployment + Service + ServiceMonitor + HPA creation.
+  image: "ghcr.io/gitcommitankit/agentrax-agent:latest"
+  replicas: 1
+  tenant: jenkins-test
+  resources:
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
