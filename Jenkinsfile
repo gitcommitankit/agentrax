@@ -23,7 +23,10 @@ pipeline {
     IMAGE_TAG  = "${env.GIT_COMMIT?.take(8) ?: env.BUILD_NUMBER}"
     IMAGE      = "ghcr.io/gitcommitankit/agentrax:${IMAGE_TAG}"
     // Kubernetes namespace used exclusively for integration testing
-    TEST_NS    = "agentrax-jenkins-test"
+    TEST_NS      = "agentrax-jenkins-test"
+    // Kind cluster and kubectl context for integration testing
+    KIND_CLUSTER = "${env.KIND_CLUSTER ?: 'agentrax-dev'}"
+    KUBE_CONTEXT = "${env.KUBE_CONTEXT ?: 'kind-agentrax-dev'}"
   }
 
   options {
@@ -116,15 +119,15 @@ pipeline {
     // -----------------------------------------------------------------------
     stage('Integration Test') {
       steps {
-        sh 'make deploy-deps'
-        sh "kind load docker-image ${IMAGE}"
-        sh "make deploy IMG=${IMAGE}"
-        sh "TEST_NS=${TEST_NS} ./hack/assert-reconciliation.sh"
+        sh "make deploy-deps KUBECTL=\"kubectl --context ${KUBE_CONTEXT}\""
+        sh "kind load docker-image ${IMAGE} --name ${KIND_CLUSTER}"
+        sh "make deploy IMG=${IMAGE} KUBECTL=\"kubectl --context ${KUBE_CONTEXT}\""
+        sh "TEST_NS=${TEST_NS} KUBECTL=\"kubectl --context ${KUBE_CONTEXT}\" ./hack/assert-reconciliation.sh"
       }
       post {
         always {
-          sh "kubectl delete namespace ${TEST_NS} --ignore-not-found=true"
-          sh 'make undeploy || true'
+          sh "kubectl --context ${KUBE_CONTEXT} delete namespace ${TEST_NS} --ignore-not-found=true"
+          sh "make undeploy KUBECTL=\"kubectl --context ${KUBE_CONTEXT}\" || true"
         }
       }
     }
