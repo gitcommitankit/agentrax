@@ -117,13 +117,13 @@ pipeline {
     stage('Integration Test') {
       steps {
         sh 'make deploy-deps'
-        sh "kind load docker-image ${IMAGE} || true"
+        sh "kind load docker-image ${IMAGE}"
         sh "make deploy IMG=${IMAGE}"
         sh "TEST_NS=${TEST_NS} ./hack/assert-reconciliation.sh"
       }
       post {
         always {
-          sh "kubectl delete namespace ${TEST_NS} --ignore-not-found=true || true"
+          sh "kubectl delete namespace ${TEST_NS} --ignore-not-found=true"
           sh 'make undeploy || true'
         }
       }
