@@ -79,21 +79,22 @@ pipeline {
     // -----------------------------------------------------------------------
     // Stage 3: Docker Build
     // Builds the operator image. Pushes to GHCR only on the main branch.
+    // Credentials are bound strictly within the main-branch push path.
     // -----------------------------------------------------------------------
     stage('Docker Build') {
       steps {
-        withCredentials([
-          string(credentialsId: 'GHCR_USER',  variable: 'GHCR_USER'),
-          string(credentialsId: 'GHCR_TOKEN', variable: 'GHCR_TOKEN'),
-        ]) {
-          sh 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin'
-          sh "make docker-build IMG=${IMAGE}"
-          script {
-            if (env.BRANCH_NAME == 'main') {
+        sh "make docker-build IMG=${IMAGE}"
+        script {
+          if (env.BRANCH_NAME == 'main') {
+            withCredentials([
+              string(credentialsId: 'GHCR_USER',  variable: 'GHCR_USER'),
+              string(credentialsId: 'GHCR_TOKEN', variable: 'GHCR_TOKEN'),
+            ]) {
+              sh 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin'
               sh "make docker-push IMG=${IMAGE}"
-            } else {
-              echo "Feature branch — image built but not pushed (branch=${env.BRANCH_NAME})."
             }
+          } else {
+            echo "Feature branch — image built but not pushed (branch=${env.BRANCH_NAME})."
           }
         }
       }
@@ -104,21 +105,25 @@ pipeline {
     //
     // 1. Installs cert-manager, Prometheus Operator CRDs, and Gateway API CRDs
     //    via `make deploy-deps` (idempotent).
-    // 2. Deploys the operator into the cluster with the newly built image.
-    // 3. Runs hack/assert-reconciliation.sh — polls until a sample
+    // 2. Loads the locally built image into the kind cluster if kind is present.
+    // 3. Deploys the operator into the cluster with the newly built image.
+    // 4. Runs hack/assert-reconciliation.sh — polls until a sample
     //    AgentDeployment reaches status.phase == Running (60 s timeout).
     //
-    // The post.always block tears down the test namespace so the cluster stays
-    // clean for the next build regardless of pass/fail.
+    // In post.always, the test namespace is deleted FIRST while the operator
+    // is still running so finalizers (agentrax.io/mcp-deregister) can execute
+    // cleanly, followed by `make undeploy`.
     // -----------------------------------------------------------------------
     stage('Integration Test') {
       steps {
         sh 'make deploy-deps'
+        sh "kind load docker-image ${IMAGE} || true"
         sh "make deploy IMG=${IMAGE}"
         sh "TEST_NS=${TEST_NS} ./hack/assert-reconciliation.sh"
       }
       post {
         always {
+          sh "kubectl delete namespace ${TEST_NS} --ignore-not-found=true || true"
           sh 'make undeploy || true'
         }
       }

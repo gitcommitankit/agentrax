@@ -464,15 +464,13 @@ This stage distinguishes the Jenkins pipeline from the GitHub Actions `ci.yml`. 
 1. Installs all cluster dependencies via `make deploy-deps` (idempotent).
 2. Deploys the operator image built in Stage 3.
 3. Applies `hack/testdata/sample-agentdeployment.yaml` and runs `hack/assert-reconciliation.sh`, which polls `status.phase` every 3 seconds until `Running` (60-second timeout). A `RolloutFailed` or `Degraded` terminal phase exits immediately with a non-zero code, failing the stage.
-4. Tears down the test namespace unconditionally in `post { always }`.
+4. In `post { always }`, deletes `TEST_NS` first while the operator is still active so finalizers (`agentrax.io/mcp-deregister`) process cleanly, then runs `make undeploy`.
 
 #### Safety Properties
 
 - **`disableConcurrentBuilds()`**: Prevents race conditions on the shared `kind` cluster between simultaneous branch builds.
 - **`--atomic` Helm flag**: Helm rolls back automatically if any hook fails during Stage 5.
 - **`submitter 'ops-team'`**: Only members of the `ops-team` Jenkins group can approve production deployments.
-
-See [`docs/jenkins/README.md`](jenkins/README.md) for local Docker-based Jenkins setup instructions.
 
 ---
 
