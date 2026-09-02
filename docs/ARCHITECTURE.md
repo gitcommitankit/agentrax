@@ -435,6 +435,45 @@ The `.github/workflows/terraform-lint.yml` workflow runs on every PR touching `i
 
 ---
 
+### 4.9 Jenkins CI/CD Pipeline
+
+Agentrax ships a declarative `Jenkinsfile` at the repository root that **complements** (not replaces) the GitHub Actions workflows. The Jenkinsfile is intended for teams running Jenkins on-prem or as a learning vehicle for a multi-stage CI/CD pipeline with a cluster-level integration test gate.
+
+#### Stage Topology
+
+```
+Lint (Go + Helm, parallel)
+         │
+       Test  (unit + envtest)
+         │
+   Docker Build  (push on main only)
+         │
+  Integration Test  ← Agentrax-specific
+         │  make deploy-deps  (cert-manager, Prometheus Operator, Gateway API CRDs)
+         │  make deploy       (operator into cluster)
+         │  hack/assert-reconciliation.sh  (poll status.phase == Running)
+         │  [post.always] make undeploy
+         │
+   Helm Deploy  (main branch + manual approval gate)
+```
+
+#### Agentrax-Specific: Stage 4 — Integration Test
+
+This stage distinguishes the Jenkins pipeline from the GitHub Actions `ci.yml`. It:
+
+1. Installs all cluster dependencies via `make deploy-deps` (idempotent).
+2. Deploys the operator image built in Stage 3.
+3. Applies `hack/testdata/sample-agentdeployment.yaml` and runs `hack/assert-reconciliation.sh`, which polls `status.phase` every 3 seconds until `Running` (60-second timeout). A `RolloutFailed` or `Degraded` terminal phase exits immediately with a non-zero code, failing the stage.
+4. In `post { always }`, deletes `TEST_NS` first while the operator is still active so finalizers (`agentrax.io/mcp-deregister`) process cleanly, then runs `make undeploy`.
+
+#### Safety Properties
+
+- **`disableConcurrentBuilds()`**: Prevents race conditions on the shared `kind` cluster between simultaneous branch builds.
+- **`--atomic` Helm flag**: Helm rolls back automatically if any hook fails during Stage 5.
+- **`submitter 'ops-team'`**: Only members of the `ops-team` Jenkins group can approve production deployments.
+
+---
+
 ## 5. Architectural Decision Records (ADRs) & Trade-Offs
 
 | Decision                                  | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |
