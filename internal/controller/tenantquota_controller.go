@@ -58,6 +58,7 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	tq := &agentraxv1alpha1.TenantQuota{}
 	if err := r.Get(ctx, req.NamespacedName, tq); err != nil {
 		if apierrors.IsNotFound(err) {
+			observability.QuotaUsageRatio.DeleteLabelValues(req.Namespace)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching TenantQuota: %w", err)
@@ -90,6 +91,7 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	latest := &agentraxv1alpha1.TenantQuota{}
 	if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
 		if apierrors.IsNotFound(err) {
+			observability.QuotaUsageRatio.DeleteLabelValues(req.Namespace)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("re-fetching TenantQuota for status update: %w", err)
@@ -106,9 +108,9 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Guard against divide-by-zero: if MaxTotalReplicas is zero the ratio is 0.
 	if latest.Spec.MaxTotalReplicas > 0 {
 		ratio := float64(usage.UsedTotalReplicas) / float64(latest.Spec.MaxTotalReplicas)
-		observability.QuotaUsageRatio.WithLabelValues(latest.Name).Set(ratio)
+		observability.QuotaUsageRatio.WithLabelValues(latest.Namespace).Set(ratio)
 	} else {
-		observability.QuotaUsageRatio.WithLabelValues(latest.Name).Set(0)
+		observability.QuotaUsageRatio.WithLabelValues(latest.Namespace).Set(0)
 	}
 
 	// 5. Set or clear the OverQuota condition based on whether usage exceeds spec.

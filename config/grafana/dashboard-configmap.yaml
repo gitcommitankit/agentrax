@@ -43,7 +43,7 @@ data:
           "datasource": "Prometheus",
           "targets": [
             {
-              "expr": "sum(rate(agentrax_reconcile_duration_seconds_count[5m])) by (tenant)",
+              "expr": "sum(rate(agentrax_reconcile_duration_seconds_count{tenant=~\"$tenant\"}[5m])) by (tenant)",
               "legendFormat": "{{ tenant }}"
             }
           ],
@@ -82,11 +82,11 @@ data:
           "datasource": "Prometheus",
           "targets": [
             {
-              "expr": "histogram_quantile(0.99, sum(rate(agentrax_reconcile_duration_seconds_bucket[5m])) by (le, tenant))",
+              "expr": "histogram_quantile(0.99, sum(rate(agentrax_reconcile_duration_seconds_bucket{tenant=~\"$tenant\"}[5m])) by (le, tenant))",
               "legendFormat": "P99 {{ tenant }}"
             },
             {
-              "expr": "histogram_quantile(0.50, sum(rate(agentrax_reconcile_duration_seconds_bucket[5m])) by (le, tenant))",
+              "expr": "histogram_quantile(0.50, sum(rate(agentrax_reconcile_duration_seconds_bucket{tenant=~\"$tenant\"}[5m])) by (le, tenant))",
               "legendFormat": "P50 {{ tenant }}"
             }
           ],

@@ -25,7 +25,7 @@ var ReconcileDuration = prometheus.NewHistogramVec(
 // QuotaUsageRatio tracks the current replica usage as a fraction of maxTotalReplicas.
 // A value of 1.0 means the tenant is at the hard replica cap.
 // Labels:
-//   - tenant: the TenantQuota name (and namespace)
+//   - tenant: the Kubernetes namespace (which maps 1:1 to a tenant in Agentrax)
 var QuotaUsageRatio = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "agentrax_tenant_quota_usage_ratio",

@@ -1,6 +1,7 @@
 package observability_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,39 +17,36 @@ import (
 // observations and that the histogram is correctly exported via text format.
 func TestReconcileDurationObserve(t *testing.T) {
 	reg := prometheus.NewRegistry()
+	observability.ReconcileDuration.Reset()
+	reg.MustRegister(observability.ReconcileDuration)
 
-	hist := prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "agentrax_reconcile_duration_seconds",
-			Help:    "Duration of AgentDeployment reconcile loops in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"controller", "tenant"},
-	)
-	reg.MustRegister(hist)
+	observability.ReconcileDuration.WithLabelValues("agentdeployment", "tenant-test").Observe(0.5)
+	observability.ReconcileDuration.WithLabelValues("agentdeployment", "tenant-test").Observe(1.5)
 
-	hist.WithLabelValues("agentdeployment", "tenant-test").Observe(0.5)
-	hist.WithLabelValues("agentdeployment", "tenant-test").Observe(1.5)
-
-	// Verify via text format: sample_count should be 2.
 	expected := `
 		# HELP agentrax_reconcile_duration_seconds Duration of AgentDeployment reconcile loops in seconds.
 		# TYPE agentrax_reconcile_duration_seconds histogram
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.005"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.01"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.025"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.05"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.1"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.25"} 0
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="0.5"} 1
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="1"} 1
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="2.5"} 2
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="5"} 2
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="10"} 2
+		agentrax_reconcile_duration_seconds_bucket{controller="agentdeployment",tenant="tenant-test",le="+Inf"} 2
+		agentrax_reconcile_duration_seconds_sum{controller="agentdeployment",tenant="tenant-test"} 2
+		agentrax_reconcile_duration_seconds_count{controller="agentdeployment",tenant="tenant-test"} 2
 	`
-	err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
-		"agentrax_reconcile_duration_seconds")
-	// We only check prefix presence, not exact bucket values — a full comparison
-	// would require listing all bucket boundaries. Use Count instead.
-	_ = err
+	err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "agentrax_reconcile_duration_seconds")
+	require.NoError(t, err)
 
 	count, err := testutil.GatherAndCount(reg, "agentrax_reconcile_duration_seconds")
 	require.NoError(t, err)
-	// GatherAndCount returns the number of MetricFamily + all their metrics
-	// (buckets + sum + count); assert > 0 to prove the histogram emitted output.
 	assert.Greater(t, count, 0, "expected histogram to produce at least one metric series")
-
-	// Verify the package-level var is registered and usable.
-	_ = observability.ReconcileDuration
 }
 
 // TestQuotaUsageRatioSet verifies that QuotaUsageRatio records the expected
@@ -68,22 +66,20 @@ func TestQuotaUsageRatioSet(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := prometheus.NewRegistry()
-			gauge := prometheus.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: "agentrax_tenant_quota_usage_ratio",
-					Help: "Current replica usage as a fraction of maxTotalReplicas.",
-				},
-				[]string{"tenant"},
-			)
-			reg.MustRegister(gauge)
+			observability.QuotaUsageRatio.Reset()
+			reg.MustRegister(observability.QuotaUsageRatio)
 
-			gauge.WithLabelValues(tc.tenant).Set(tc.value)
+			observability.QuotaUsageRatio.WithLabelValues(tc.tenant).Set(tc.value)
 
-			got := testutil.ToFloat64(gauge.WithLabelValues(tc.tenant))
+			expected := fmt.Sprintf(`
+				# HELP agentrax_tenant_quota_usage_ratio Current replica usage as a fraction of maxTotalReplicas (0.0–1.0) per tenant.
+				# TYPE agentrax_tenant_quota_usage_ratio gauge
+				agentrax_tenant_quota_usage_ratio{tenant="%s"} %g
+			`, tc.tenant, tc.value)
+			require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "agentrax_tenant_quota_usage_ratio"))
+
+			got := testutil.ToFloat64(observability.QuotaUsageRatio.WithLabelValues(tc.tenant))
 			assert.InDelta(t, tc.expected, got, 1e-9)
 		})
 	}
-
-	// Verify the package-level var is registered and usable.
-	_ = observability.QuotaUsageRatio
 }
