@@ -435,6 +435,40 @@ The `.github/workflows/terraform-lint.yml` workflow runs on every PR touching `i
 
 ---
 
+### 4.10 Custom Prometheus Metrics, Alerting, & Grafana Dashboard
+
+Agentrax exports two custom metrics via `internal/observability/metrics.go`, both registered against the controller-runtime shared Prometheus registry (exposed on `/metrics`):
+
+| Metric | Type | Labels | What it measures |
+| :--- | :--- | :--- | :--- |
+| `agentrax_reconcile_duration_seconds` | Histogram | `controller`, `tenant` | Wall-clock duration of every `AgentDeployment` reconcile loop |
+| `agentrax_tenant_quota_usage_ratio` | Gauge | `tenant` | `usedTotalReplicas / maxTotalReplicas` — approaches 1.0 at the quota ceiling |
+
+#### Instrumentation Points
+
+- **`internal/controller/agentdeployment_controller.go`**: A deferred closure at the top of `Reconcile()` records the histogram observation on every exit path — including early returns, errors, and requeues — so no reconcile path is missed.
+- **`internal/controller/tenantquota_controller.go`**: The quota gauge is updated after `ComputeUsage()` runs, guarded against divide-by-zero when `MaxTotalReplicas` is zero.
+
+#### Alerting Rules (`config/prometheus/alerting-rules.yaml`)
+
+A `PrometheusRule` CRD with two alert groups, auto-discovered by the Prometheus Operator:
+
+| Alert | Expression | Duration | Severity |
+| :--- | :--- | :--- | :--- |
+| `AgentraxReconcileLatencyHigh` | P99 reconcile latency > 2s | 5 min | critical |
+| `AgentraxTenantQuotaHigh` | Quota usage ratio > 0.9 | 2 min | warning |
+
+#### Grafana RED Dashboard (`config/grafana/dashboard-configmap.yaml`)
+
+A `ConfigMap` labelled `grafana_dashboard: "1"` auto-imported by the `kube-prometheus-stack` Grafana sidecar. Contains 4 panels:
+
+- **Rate**: `rate(agentrax_reconcile_duration_seconds_count[5m])` per tenant
+- **Errors**: `rate(controller_runtime_reconcile_errors_total[5m])` for the `agentdeployment` controller
+- **Duration**: P99 and P50 latency time-series with red/yellow/green threshold colouring at 2s/1s
+- **Quota**: Gauge panel per tenant with a `$tenant` template variable; turns red above 90%
+
+---
+
 ## 5. Architectural Decision Records (ADRs) & Trade-Offs
 
 | Decision                                  | Alternative Considered                       | Trade-Off & Rationale for Agentrax                                                                                                                                                                                                                                       |

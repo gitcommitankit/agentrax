@@ -1,0 +1,59 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentrax-alerts
+  namespace: agentrax-system
+  labels:
+    app.kubernetes.io/name: agentrax
+    app.kubernetes.io/component: alerting
+    # kube-prometheus-stack discovers PrometheusRule resources by this label.
+    release: kube-prometheus-stack
+spec:
+  groups:
+
+    # -------------------------------------------------------------------------
+    # Reconcile latency — fires when the P99 reconcile time sustained > 2s.
+    # This indicates the operator is struggling to converge: slow API server,
+    # contention on the TenantQuota lock, or an unhealthy admission webhook.
+    # -------------------------------------------------------------------------
+    - name: agentrax.reconcile
+      rules:
+        - alert: AgentraxReconcileLatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(agentrax_reconcile_duration_seconds_bucket[5m]))
+              by (le, controller, tenant)
+            ) > 2
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: >-
+              Reconcile P99 > 2s for controller={{ $labels.controller }}
+              tenant={{ $labels.tenant }}
+            description: >-
+              The AgentDeployment reconciler P99 latency has exceeded 2 seconds
+              for 5 minutes. Check kube-apiserver latency, webhook response times,
+              and operator logs for slow database or registry calls.
+            runbook_url: "https://github.com/gitcommitankit/agentrax/docs/ARCHITECTURE.md"
+
+    # -------------------------------------------------------------------------
+    # Quota saturation — fires when a tenant's replica usage ratio exceeds 90%.
+    # Early warning before the hard cap blocks new AgentDeployment creates.
+    # -------------------------------------------------------------------------
+    - name: agentrax.quota
+      rules:
+        - alert: AgentraxTenantQuotaHigh
+          expr: agentrax_tenant_quota_usage_ratio > 0.9
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              Tenant {{ $labels.tenant }} replica quota usage > 90%
+            description: >-
+              Tenant {{ $labels.tenant }} is using more than 90% of its
+              maxTotalReplicas quota. New AgentDeployment creates will be
+              rejected by the admission webhook when the limit is reached.
+              Consider raising maxTotalReplicas in the TenantQuota spec.
+            runbook_url: "https://github.com/gitcommitankit/agentrax/docs/ARCHITECTURE.md"

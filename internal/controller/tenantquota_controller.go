@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/observability"
 	"github.com/gitcommitankit/agentrax/internal/quota"
 )
 
@@ -57,6 +58,7 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	tq := &agentraxv1alpha1.TenantQuota{}
 	if err := r.Get(ctx, req.NamespacedName, tq); err != nil {
 		if apierrors.IsNotFound(err) {
+			observability.QuotaUsageRatio.DeleteLabelValues(req.Namespace)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching TenantQuota: %w", err)
@@ -89,6 +91,7 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	latest := &agentraxv1alpha1.TenantQuota{}
 	if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
 		if apierrors.IsNotFound(err) {
+			observability.QuotaUsageRatio.DeleteLabelValues(req.Namespace)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("re-fetching TenantQuota for status update: %w", err)
@@ -99,6 +102,16 @@ func (r *TenantQuotaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	latest.Status.UsedAgents = usage.UsedAgents
 	latest.Status.UsedGPUs = usage.UsedGPUs
 	latest.Status.UsedTotalReplicas = usage.UsedTotalReplicas
+
+	// Emit quota usage ratio metric so Grafana and alerting rules can track
+	// how close this tenant is to its replica ceiling in real time.
+	// Guard against divide-by-zero: if MaxTotalReplicas is zero the ratio is 0.
+	if latest.Spec.MaxTotalReplicas > 0 {
+		ratio := float64(usage.UsedTotalReplicas) / float64(latest.Spec.MaxTotalReplicas)
+		observability.QuotaUsageRatio.WithLabelValues(latest.Namespace).Set(ratio)
+	} else {
+		observability.QuotaUsageRatio.WithLabelValues(latest.Namespace).Set(0)
+	}
 
 	// 5. Set or clear the OverQuota condition based on whether usage exceeds spec.
 	// Use latest.Spec (re-fetched) rather than tq.Spec (first fetch) to avoid

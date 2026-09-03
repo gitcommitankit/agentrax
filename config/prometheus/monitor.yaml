@@ -6,6 +6,7 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: agentrax
     app.kubernetes.io/managed-by: kustomize
+    release: kube-prometheus-stack
   name: controller-manager-metrics-monitor
   namespace: system
 spec:

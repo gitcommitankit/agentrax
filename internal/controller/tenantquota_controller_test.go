@@ -30,6 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
+	"github.com/gitcommitankit/agentrax/internal/observability"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 var _ = Describe("TenantQuota Controller", func() {
@@ -153,6 +156,45 @@ var _ = Describe("TenantQuota Controller", func() {
 				tqFetched := &agentraxv1alpha1.TenantQuota{}
 				g.Expect(k8sClient.Get(ctx, namespacedName("tq-del", tqNS), tqFetched)).To(Succeed())
 				g.Expect(tqFetched.Status.UsedAgents).To(BeNumerically("==", 0))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("updates and cleans up QuotaUsageRatio metric keyed by tenant namespace", func() {
+			tq := makeTQ("tq-metric", tqNS, 6, 4, 10, 6)
+			Expect(k8sClient.Create(ctx, tq)).To(Succeed())
+
+			ad := makeBasicAD("ad-metric-1", tqNS, "tq-metric", 2)
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				val := testutil.ToFloat64(observability.QuotaUsageRatio.WithLabelValues(tqNS))
+				g.Expect(val).To(BeNumerically("~", 0.2, 1e-4))
+			}, timeout, interval).Should(Succeed())
+
+			// Deleting the TenantQuota should trigger reconcile NotFound path and remove the series.
+			Expect(k8sClient.Delete(ctx, tq)).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, namespacedName("tq-metric", tqNS), &agentraxv1alpha1.TenantQuota{})
+				return apierrors.IsNotFound(err)
+			}, timeout, interval).Should(BeTrue())
+
+			Eventually(func(g Gomega) {
+				mfs, err := crmetrics.Registry.Gather()
+				g.Expect(err).NotTo(HaveOccurred())
+				found := false
+				for _, mf := range mfs {
+					if mf.GetName() == "agentrax_tenant_quota_usage_ratio" {
+						for _, m := range mf.GetMetric() {
+							for _, lbl := range m.GetLabel() {
+								if lbl.GetName() == "tenant" && lbl.GetValue() == tqNS {
+									found = true
+									break
+								}
+							}
+						}
+					}
+				}
+				g.Expect(found).To(BeFalse(), "expected no metric sample labeled tenant=%q to remain", tqNS)
 			}, timeout, interval).Should(Succeed())
 		})
 	})
