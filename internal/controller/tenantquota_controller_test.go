@@ -32,6 +32,7 @@ import (
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/observability"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 var _ = Describe("TenantQuota Controller", func() {
@@ -178,8 +179,22 @@ var _ = Describe("TenantQuota Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			Eventually(func(g Gomega) {
-				// DeleteLabelValues returns false when the series is already gone.
-				g.Expect(observability.QuotaUsageRatio.DeleteLabelValues(tqNS)).To(BeFalse())
+				mfs, err := crmetrics.Registry.Gather()
+				g.Expect(err).NotTo(HaveOccurred())
+				found := false
+				for _, mf := range mfs {
+					if mf.GetName() == "agentrax_tenant_quota_usage_ratio" {
+						for _, m := range mf.GetMetric() {
+							for _, lbl := range m.GetLabel() {
+								if lbl.GetName() == "tenant" && lbl.GetValue() == tqNS {
+									found = true
+									break
+								}
+							}
+						}
+					}
+				}
+				g.Expect(found).To(BeFalse(), "expected no metric sample labeled tenant=%q to remain", tqNS)
 			}, timeout, interval).Should(Succeed())
 		})
 	})
