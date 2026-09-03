@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -40,7 +41,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -51,6 +51,7 @@ import (
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
 	"github.com/gitcommitankit/agentrax/internal/controller"
 	"github.com/gitcommitankit/agentrax/internal/metrics"
+	"github.com/gitcommitankit/agentrax/internal/observability"
 	"github.com/gitcommitankit/agentrax/internal/quota"
 	"github.com/gitcommitankit/agentrax/internal/registry"
 	"github.com/gitcommitankit/agentrax/internal/rollout"
@@ -124,6 +125,8 @@ func main() {
 	var gatewayName string
 	var gatewayNamespace string
 	var registryAddr string
+	var otlpEndpoint string
+	var logLevel string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -146,13 +149,37 @@ func main() {
 		"Namespace of the Gateway API Gateway object used for canary traffic splitting.")
 	flag.StringVar(&registryAddr, "registry-bind-address", ":9090",
 		"The address the MCP discovery registry HTTP endpoint binds to.")
-	opts := zap.Options{
-		Development: false,
-	}
-	opts.BindFlags(flag.CommandLine)
+	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "",
+		"gRPC endpoint for the OpenTelemetry trace exporter (e.g. localhost:4317). "+
+			"Leave empty to disable tracing.")
+	flag.StringVar(&logLevel, "log-level", "info",
+		"Minimum log level to emit. One of: debug, info, warn, error.")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	// Configure structured JSON logging via log/slog, bridged to controller-runtime
+	// through the logr interface. This replaces the default Zap logger.
+	var slogLevel slog.Level
+	if err := slogLevel.UnmarshalText([]byte(logLevel)); err != nil {
+		slogLevel = slog.LevelInfo
+	}
+	slogLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slogLevel}))
+	ctrl.SetLogger(observability.NewLogr(slogLogger))
+
+	// Initialize OTel TracerProvider. The returned Shutdown must be deferred so
+	// buffered spans are flushed before the process exits.
+	startCtx := context.Background()
+	tpShutdown, err := observability.InitTracerProvider(startCtx, otlpEndpoint)
+	if err != nil {
+		setupLog.Error(err, "unable to initialize OpenTelemetry TracerProvider")
+		os.Exit(1)
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutErr := tpShutdown(shutCtx); shutErr != nil {
+			setupLog.Error(shutErr, "error shutting down OTel TracerProvider")
+		}
+	}()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

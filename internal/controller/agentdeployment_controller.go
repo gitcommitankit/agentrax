@@ -40,6 +40,9 @@ import (
 
 	"github.com/go-logr/logr"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	agentraxv1alpha1 "github.com/gitcommitankit/agentrax/api/v1alpha1"
@@ -125,7 +128,22 @@ type AgentDeploymentReconciler struct {
 // It creates and self-heals a Deployment, Service, and (when Prometheus Operator is present)
 // a ServiceMonitor as owned child resources, then updates status conditions.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Start a root OTel span for the entire reconcile loop. The span is ended via
+	// defer so all exit paths (early return, error, requeue) are covered.
+	ctx, span := observability.Tracer.Start(ctx, "reconcile",
+		trace.WithAttributes(
+			attribute.String("tenant", req.Namespace),
+			attribute.String("name", req.Name),
+		),
+	)
+	defer span.End()
+
+	// Enrich the controller-runtime logger with trace_id/span_id so every log
+	// line emitted inside this reconcile cycle is correlated to the active OTel trace.
 	logger := log.FromContext(ctx)
+	if sc := span.SpanContext(); sc.IsValid() {
+		logger = logger.WithValues("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+	}
 
 	// Observe reconcile wall-clock duration on every exit path, including early
 	// returns, errors, and requeues. The tenant label uses the request namespace
@@ -138,13 +156,18 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}()
 
 	// 1. Fetch the AgentDeployment; return immediately if it has been deleted.
+	ctx, fetchSpan := observability.Tracer.Start(ctx, "fetch_crd")
 	ad := &agentraxv1alpha1.AgentDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, ad); err != nil {
+		fetchSpan.RecordError(err)
+		fetchSpan.SetStatus(codes.Error, "fetch_crd failed")
+		fetchSpan.End()
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
 	}
+	fetchSpan.End()
 
 	// 2. Handle finalizer lifecycle.
 	if ad.DeletionTimestamp.IsZero() {
@@ -202,18 +225,32 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
+	// 4–7. Reconcile child resources (Deployment, Service, ServiceMonitor, HPA)
+	// under a single span. Each helper propagates ctx so sub-operations can be
+	// correlated if they are instrumented in future phases.
+	ctx, childrenSpan := observability.Tracer.Start(ctx, "reconcile_children")
+
 	// 4. Reconcile child Deployment.
 	if err := r.reconcileDeployment(ctx, ad); err != nil {
+		childrenSpan.RecordError(err)
+		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
+		childrenSpan.End()
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
 
 	// 5. Reconcile child Service.
 	if err := r.reconcileService(ctx, ad); err != nil {
+		childrenSpan.RecordError(err)
+		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
+		childrenSpan.End()
 		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
 	}
 
 	// 6. Reconcile ServiceMonitor when Prometheus Operator is present.
 	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
+		childrenSpan.RecordError(err)
+		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
+		childrenSpan.End()
 		return ctrl.Result{}, fmt.Errorf("reconciling servicemonitor: %w", err)
 	}
 
@@ -222,17 +259,27 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// write the correct QuotaLimited condition onto the freshly re-fetched object.
 	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
 	if err != nil {
+		childrenSpan.RecordError(err)
+		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
+		childrenSpan.End()
 		return ctrl.Result{}, fmt.Errorf("reconciling hpa: %w", err)
 	}
+	childrenSpan.End()
 
 	// 8. Derive status from the live Deployment and update it — always last.
 	// We continue into updateStatus even when hpaResult requests a requeue so
 	// that the QuotaLimited condition is written in the same reconcile cycle.
 	// Return the shorter of the two requeue intervals.
+	ctx, statusSpan := observability.Tracer.Start(ctx, "update_status")
 	statusResult, err := r.updateStatus(ctx, ad, logger, qs)
 	if err != nil {
+		statusSpan.RecordError(err)
+		statusSpan.SetStatus(codes.Error, "update_status failed")
+		statusSpan.End()
 		return statusResult, fmt.Errorf("updating status: %w", err)
 	}
+	statusSpan.End()
+
 	if hpaResult.RequeueAfter > 0 {
 		if statusResult.RequeueAfter == 0 || hpaResult.RequeueAfter < statusResult.RequeueAfter {
 			return hpaResult, nil
