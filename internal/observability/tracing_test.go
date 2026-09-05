@@ -19,7 +19,7 @@ func TestInitTracerProvider_Noop(t *testing.T) {
 	original := otel.GetTracerProvider()
 	t.Cleanup(func() { otel.SetTracerProvider(original) })
 
-	shutdown, err := InitTracerProvider(context.Background(), "")
+	shutdown, err := InitTracerProvider(context.Background(), "", false)
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
 
@@ -28,6 +28,44 @@ func TestInitTracerProvider_Noop(t *testing.T) {
 
 	// The global provider must be the same as before (no-op path leaves it alone).
 	assert.Equal(t, original, otel.GetTracerProvider())
+}
+
+// TestInitTracerProvider_Endpoint verifies that non-empty endpoints configure
+// the tracer provider with either insecure or default TLS options.
+func TestInitTracerProvider_Endpoint(t *testing.T) {
+	original := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(original) })
+
+	// Test insecure=true
+	shutdownInsecure, err := InitTracerProvider(context.Background(), "127.0.0.1:4317", true)
+	require.NoError(t, err)
+	require.NotNil(t, shutdownInsecure)
+	require.NoError(t, shutdownInsecure(context.Background()))
+
+	// Test insecure=false (TLS default)
+	shutdownTLS, err := InitTracerProvider(context.Background(), "127.0.0.1:4317", false)
+	require.NoError(t, err)
+	require.NotNil(t, shutdownTLS)
+	require.NoError(t, shutdownTLS(context.Background()))
+}
+
+// TestInitTracerProvider_HonorsSamplerEnv verifies that OTEL_TRACES_SAMPLER
+// is honored rather than overridden by a hardcoded AlwaysSample sampler.
+func TestInitTracerProvider_HonorsSamplerEnv(t *testing.T) {
+	original := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(original) })
+
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+	shutdown, err := InitTracerProvider(context.Background(), "127.0.0.1:4317", true)
+	require.NoError(t, err)
+	require.NotNil(t, shutdown)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	_, span := Tracer.Start(context.Background(), "test-sampler-span")
+	defer span.End()
+
+	assert.False(t, span.SpanContext().IsSampled(), "expected span not to be sampled when OTEL_TRACES_SAMPLER=always_off")
 }
 
 // TestWithTraceContext_NoSpan verifies that WithTraceContext is safe to call

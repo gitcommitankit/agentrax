@@ -126,6 +126,7 @@ func main() {
 	var gatewayNamespace string
 	var registryAddr string
 	var otlpEndpoint string
+	var otlpInsecure bool
 	var logLevel string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -152,6 +153,9 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "",
 		"gRPC endpoint for the OpenTelemetry trace exporter (e.g. localhost:4317). "+
 			"Leave empty to disable tracing.")
+	flag.BoolVar(&otlpInsecure, "otlp-insecure", false,
+		"Use plaintext (insecure) gRPC connection for OpenTelemetry trace exporter. "+
+			"Only use for local development; remote collectors use TLS by default.")
 	flag.StringVar(&logLevel, "log-level", "info",
 		"Minimum log level to emit. One of: debug, info, warn, error.")
 	flag.Parse()
@@ -168,7 +172,7 @@ func main() {
 	// Initialize OTel TracerProvider. The returned Shutdown must be deferred so
 	// buffered spans are flushed before the process exits.
 	startCtx := context.Background()
-	tpShutdown, err := observability.InitTracerProvider(startCtx, otlpEndpoint)
+	tpShutdown, err := observability.InitTracerProvider(startCtx, otlpEndpoint, otlpInsecure)
 	if err != nil {
 		setupLog.Error(err, "unable to initialize OpenTelemetry TracerProvider")
 		os.Exit(1)

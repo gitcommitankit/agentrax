@@ -30,18 +30,24 @@ var Tracer trace.Tracer = noop.NewTracerProvider().Tracer(TracerName)
 
 // InitTracerProvider configures the global OpenTelemetry TracerProvider and
 // installs a W3C TraceContext propagator. When endpoint is empty it installs a
-// no-op provider (tracing disabled). The returned Shutdown function flushes and
-// stops the exporter; it must be deferred in main().
-func InitTracerProvider(ctx context.Context, endpoint string) (func(context.Context) error, error) {
+// no-op provider (tracing disabled). TLS is used by default for exporter connections;
+// set insecure to true only for local development with plaintext collectors.
+// The returned Shutdown function flushes and stops the exporter; it must be
+// deferred in main().
+func InitTracerProvider(ctx context.Context, endpoint string, insecure bool) (func(context.Context) error, error) {
 	if endpoint == "" {
 		// No-op: tracing disabled. Global tracer stays as the default no-op.
 		return func(context.Context) error { return nil }, nil
 	}
 
-	exp, err := otlptracegrpc.New(ctx,
+	opts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
-	)
+	}
+	if insecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	exp, err := otlptracegrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating OTLP gRPC exporter: %w", err)
 	}
@@ -59,9 +65,6 @@ func InitTracerProvider(ctx context.Context, endpoint string) (func(context.Cont
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp),
 		sdktrace.WithResource(res),
-		// Sample all traces by default. Operators may reduce this with env-based
-		// sampler configuration via OTEL_TRACES_SAMPLER.
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
 
 	otel.SetTracerProvider(tp)

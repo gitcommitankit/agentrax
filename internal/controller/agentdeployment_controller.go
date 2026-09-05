@@ -144,6 +144,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if sc := span.SpanContext(); sc.IsValid() {
 		logger = logger.WithValues("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
 	}
+	ctx = log.IntoContext(ctx, logger)
 
 	// Observe reconcile wall-clock duration on every exit path, including early
 	// returns, errors, and requeues. The tenant label uses the request namespace
@@ -156,15 +157,16 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}()
 
 	// 1. Fetch the AgentDeployment; return immediately if it has been deleted.
-	ctx, fetchSpan := observability.Tracer.Start(ctx, "fetch_crd")
+	fetchCtx, fetchSpan := observability.Tracer.Start(ctx, "fetch_crd")
 	ad := &agentraxv1alpha1.AgentDeployment{}
-	if err := r.Get(ctx, req.NamespacedName, ad); err != nil {
+	if err := r.Get(fetchCtx, req.NamespacedName, ad); err != nil {
+		if apierrors.IsNotFound(err) {
+			fetchSpan.End()
+			return ctrl.Result{}, nil
+		}
 		fetchSpan.RecordError(err)
 		fetchSpan.SetStatus(codes.Error, "fetch_crd failed")
 		fetchSpan.End()
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
 	}
 	fetchSpan.End()
@@ -228,10 +230,10 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// 4–7. Reconcile child resources (Deployment, Service, ServiceMonitor, HPA)
 	// under a single span. Each helper propagates ctx so sub-operations can be
 	// correlated if they are instrumented in future phases.
-	ctx, childrenSpan := observability.Tracer.Start(ctx, "reconcile_children")
+	childrenCtx, childrenSpan := observability.Tracer.Start(ctx, "reconcile_children")
 
 	// 4. Reconcile child Deployment.
-	if err := r.reconcileDeployment(ctx, ad); err != nil {
+	if err := r.reconcileDeployment(childrenCtx, ad); err != nil {
 		childrenSpan.RecordError(err)
 		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
 		childrenSpan.End()
@@ -239,7 +241,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// 5. Reconcile child Service.
-	if err := r.reconcileService(ctx, ad); err != nil {
+	if err := r.reconcileService(childrenCtx, ad); err != nil {
 		childrenSpan.RecordError(err)
 		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
 		childrenSpan.End()
@@ -247,7 +249,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// 6. Reconcile ServiceMonitor when Prometheus Operator is present.
-	if err := r.reconcileServiceMonitor(ctx, ad); err != nil {
+	if err := r.reconcileServiceMonitor(childrenCtx, ad); err != nil {
 		childrenSpan.RecordError(err)
 		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
 		childrenSpan.End()
@@ -257,7 +259,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// 7. Reconcile the managed HPA (skip during active canary — Phase 4 owns it).
 	// reconcileHPA also returns the quota evaluation state so updateStatus can
 	// write the correct QuotaLimited condition onto the freshly re-fetched object.
-	hpaResult, qs, err := r.reconcileHPA(ctx, ad)
+	hpaResult, qs, err := r.reconcileHPA(childrenCtx, ad)
 	if err != nil {
 		childrenSpan.RecordError(err)
 		childrenSpan.SetStatus(codes.Error, "reconcile_children failed")
@@ -270,8 +272,8 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// We continue into updateStatus even when hpaResult requests a requeue so
 	// that the QuotaLimited condition is written in the same reconcile cycle.
 	// Return the shorter of the two requeue intervals.
-	ctx, statusSpan := observability.Tracer.Start(ctx, "update_status")
-	statusResult, err := r.updateStatus(ctx, ad, logger, qs)
+	statusCtx, statusSpan := observability.Tracer.Start(ctx, "update_status")
+	statusResult, err := r.updateStatus(statusCtx, ad, logger, qs)
 	if err != nil {
 		statusSpan.RecordError(err)
 		statusSpan.SetStatus(codes.Error, "update_status failed")
