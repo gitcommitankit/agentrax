@@ -104,6 +104,14 @@ mcp:
   # -- Periodic health check interval for registered agents (e.g. "30s")
   healthInterval: "30s"
 
+# -- OpenTelemetry tracing configuration
+otlp:
+  # -- gRPC endpoint for the OTLP trace exporter (e.g. "jaeger.agentrax-system.svc:4317").
+  # Leave empty to disable tracing.
+  endpoint: ""
+  # -- Use plaintext gRPC for the OTLP exporter (only for local development).
+  insecure: false
+
 # -- Cloud Workload Identity — secretless pod-level IAM.
 # Supported providers: azure (AKS Workload Identity), aws (EKS IRSA).
 # When disabled (the default), no annotations or labels are injected.

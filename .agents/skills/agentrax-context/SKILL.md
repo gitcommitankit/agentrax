@@ -22,22 +22,24 @@ description: Project context and settled architecture decisions for the Agentrax
 - **Traffic splitting**: Gateway API `HTTPRoute` weighted backends. Not Istio, not ingress annotations.
 - **Network Isolation**: Two-tier Kubernetes `NetworkPolicy` (`allow-metrics-traffic` in `agentrax-system` allowing operator metrics on TCP 8443; `tenant-agent-isolation` rendered into every `tenant-*` namespace selecting agent pods with `agentrax.io/agent: "true"` for scraping on TCP 8080 and egress to API server/CoreDNS in `kube-system`). No service mesh.
 - **Cloud Workload Identity**: No static cloud credentials ever. Azure deployments use AKS Workload Identity (`azure.workload.identity/client-id` + `/tenant-id` ServiceAccount annotations; `azure.workload.identity/use: "true"` pod label). AWS deployments use IRSA (`eks.amazonaws.com/role-arn` annotation). In Helm deployments, both are opt-in via `workloadIdentity.enabled` in `charts/agentrax/values.yaml` (disabled by default for portability); in Kustomize deployments, AWS IRSA is activated via the `config/workload-identity/irsa-serviceaccount.yaml` strategic-merge patch.
+- **Observability & Tracing**: Structured logging via Go stdlib `log/slog` (JSON format) bridged to `logr`, completely replacing Zap. Distributed tracing via OpenTelemetry SDK with OTLP gRPC exporter (`--otlp-endpoint`, `--otlp-insecure`). Context propagation automatically extracts and injects `trace_id` and `span_id` into all structured logs. Custom Prometheus metrics: `agentrax_reconcile_duration_seconds` (histogram) and `agentrax_tenant_quota_usage_ratio` (gauge) registered against the shared metrics registry.
 - **Terraform IaC**: All cluster provisioning and Helm stack installation goes through the `infra/` Terraform modules (`kind_cluster` + `agentrax_stack`). Do not add raw shell provisioning scripts. Dev convenience via `make terraform-apply`; CI gate via `.github/workflows/terraform-lint.yml`.
 - **MCP registry**: embedded HTTP handler inside the operator process, backed by a `ConfigMap`. Not a separate Deployment, not a new database — HA storage is a v2 item.
 - **Non-goals**: no model training/fine-tuning, no general-purpose workload management, no service mesh, no UI in v1. Flag any drift toward these rather than quietly implementing them.
 
 ## Package map
 
-| Package                | Responsibility                                                                                                                   |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `api/v1alpha1/`        | CRD Go types, validation markers, defaulting. No business logic.                                                                 |
-| `internal/controller/` | Reconcile loops. Only code that calls the Kubernetes API for core-owned resources.                                               |
-| `internal/rollout/`    | Canary state machine and PromQL threshold evaluation.                                                                            |
-| `internal/scaling/`    | HPA generation and quota-capped scaling logic.                                                                                   |
-| `internal/registry/`   | MCP registrar, registry HTTP handler, TTL sweep.                                                                                 |
-| `internal/quota/`      | Quota arithmetic and in-flight reservation. Shared by webhook and TenantQuota reconciler.                                        |
-| `internal/webhook/`    | Validating and mutating admission webhooks. Lives here (not `api/`) to import `internal/quota` without creating an import cycle. |
-| `internal/metrics/`    | Shared Prometheus client plumbing used by rollout and scaling.                                                                   |
+| Package                    | Responsibility                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `api/v1alpha1/`            | CRD Go types, validation markers, defaulting. No business logic.                                                                 |
+| `internal/controller/`     | Reconcile loops. Only code that calls the Kubernetes API for core-owned resources.                                               |
+| `internal/rollout/`        | Canary state machine and PromQL threshold evaluation.                                                                            |
+| `internal/scaling/`        | HPA generation and quota-capped scaling logic.                                                                                   |
+| `internal/registry/`       | MCP registrar, registry HTTP handler, TTL sweep.                                                                                 |
+| `internal/quota/`          | Quota arithmetic and in-flight reservation. Shared by webhook and TenantQuota reconciler.                                        |
+| `internal/webhook/`        | Validating and mutating admission webhooks. Lives here (not `api/`) to import `internal/quota` without creating an import cycle. |
+| `internal/observability/`  | Structured `slog` logging, OpenTelemetry tracing setup, and custom Prometheus metrics instrumentation.                           |
+| `internal/metrics/`        | Shared Prometheus client plumbing used by rollout and scaling.                                                                   |
 
 ## Where the hard logic lives
 

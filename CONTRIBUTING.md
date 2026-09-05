@@ -14,7 +14,7 @@ Please be respectful and collaborative in all communications, issue threads, and
 
 Ensure you have the following installed on your development machine:
 
-- **Go**: `1.23` or later
+- **Go**: `1.22` or later
 - **Docker**: `20.10+` with BuildKit enabled
 - **Kind**: `v0.22+` (for local E2E cluster testing)
 - **Kubectl**: `v1.30+`
@@ -26,23 +26,28 @@ Ensure you have the following installed on your development machine:
 ## Getting Started
 
 1. **Fork and Clone**:
+
    ```bash
    git clone https://github.com/<your-username>/agentrax.git
    cd agentrax
    ```
 
 2. **Install Local Git Quality Hooks**:
+
    ```bash
    make setup-git-hooks
    ```
-   *Installs pre-commit hooks (`go fmt`, `go vet`, `golangci-lint`) and pre-push hooks (`codegen-drift`, `make test`, `helm lint`).*
+
+   _Installs pre-commit hooks (`go fmt`, `go vet`, `golangci-lint`) and pre-push hooks (`codegen-drift`, `make test`, `helm lint`)._
 
 3. **Run Unit & EnvTest Integration Tests**:
+
    ```bash
    make test
    ```
 
 4. **Run Linter**:
+
    ```bash
    make lint
    ```
@@ -55,9 +60,17 @@ Ensure you have the following installed on your development machine:
 
 ---
 
-## Running Local E2E Tests (Kind)
+## Running Local Dev & E2E Tests (Kind)
 
-To test changes against a live Kind cluster:
+### Option A: Declarative Stack with Terraform (Recommended)
+
+Provision a 2-node Kind cluster and deploy the full stack (`cert-manager` + `kube-prometheus-stack` + `agentrax`) in one step:
+
+```bash
+make terraform-apply
+```
+
+### Option B: Manual Cluster Setup
 
 ```bash
 # 1. Create Kind cluster

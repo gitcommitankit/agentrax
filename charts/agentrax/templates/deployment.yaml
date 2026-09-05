@@ -59,6 +59,12 @@ spec:
             {{- if .Values.gateway.namespace }}
             - --gateway-namespace={{ .Values.gateway.namespace }}
             {{- end }}
+            {{- if .Values.otlp.endpoint }}
+            - --otlp-endpoint={{ .Values.otlp.endpoint }}
+            {{- if .Values.otlp.insecure }}
+            - --otlp-insecure=true
+            {{- end }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

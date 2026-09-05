@@ -63,13 +63,16 @@ flowchart TB
 
 ## Key Features
 
-| Feature                         | Description                                                                                                            | Key Mechanism                                                           |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **Declarative Agent Lifecycle** | Complete deployment management, self-healing, status tracking, and graceful teardown.                                  | `AgentDeployment` reconciler + controller runtime finalizers            |
-| **Multi-Tenant Quotas**         | Atomic quota admission preventing concurrent over-commit of agent instances, GPU counts, and total replicas.           | In-flight reservations + Validating Webhook + `TenantQuota` reconciler  |
-| **Inference Autoscaling**       | Scale-out and scale-in driven by custom agent metrics (`queueDepth`, `gpuUtilization`) with quota ceiling enforcement. | Prometheus Adapter + native `HorizontalPodAutoscaler`                   |
-| **Statistical Canary Rollouts** | Automated progressive traffic shifting with sample-size gating and Prometheus error/latency threshold rollback.        | Gateway API `HTTPRoute` weights + PromQL evaluation                     |
-| **Native MCP Discovery**        | In-cluster registry with JSON-RPC 2.0 handshake validation, tool capability aggregation, and TTL heartbeat sweeps.     | In-operator HTTP Server (`:9090`) + ConfigMap persistence + TTL sweeper |
+| Feature                           | Description                                                                                                            | Key Mechanism                                                           |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **Declarative Agent Lifecycle**   | Complete deployment management, self-healing, status tracking, and graceful teardown.                                  | `AgentDeployment` reconciler + controller runtime finalizers            |
+| **Multi-Tenant Quotas**           | Atomic quota admission preventing concurrent over-commit of agent instances, GPU counts, and total replicas.           | In-flight reservations + Validating Webhook + `TenantQuota` reconciler  |
+| **Inference Autoscaling**         | Scale-out and scale-in driven by custom agent metrics (`queueDepth`, `gpuUtilization`) with quota ceiling enforcement. | Prometheus Adapter + native `HorizontalPodAutoscaler`                   |
+| **Statistical Canary Rollouts**   | Automated progressive traffic shifting with sample-size gating and Prometheus error/latency threshold rollback.        | Gateway API `HTTPRoute` weights + PromQL evaluation                     |
+| **Native MCP Discovery**          | In-cluster registry with JSON-RPC 2.0 handshake validation, tool capability aggregation, and TTL heartbeat sweeps.     | In-operator HTTP Server (`:9090`) + ConfigMap persistence + TTL sweeper |
+| **Zero-Trust Network Isolation**  | Default-deny packet filtering isolating tenant agent pods, allowing only scraped metrics, CoreDNS, and API server.     | Two-tier `NetworkPolicy` with `agentrax.io/agent: "true"` pod selection |
+| **Multi-Cloud Workload Identity** | Keyless cloud IAM integration for Azure AKS (Workload Identity) and AWS EKS (IRSA) without static credentials.         | Projected service account tokens + cloud OIDC federation                |
+| **Full-Stack Observability**      | End-to-end OpenTelemetry distributed tracing, structured `slog` JSON logs, custom Prometheus metrics, and alert rules. | OTLP gRPC export + `PrometheusRule` alerts + Grafana dashboard config   |
 
 ---
 
@@ -79,13 +82,51 @@ flowchart TB
 
 - **Go**: `v1.22+`
 - **Docker**: `v20.10+`
-- **Kubernetes Cluster**: `v1.28+` (e.g., `kind`, `minikube`, or cloud provider)
+- **Kubernetes Cluster**: `v1.28+` (e.g., `kind`, `minikube`, AKS, EKS)
 - **kubectl**: `v1.28+`
-- **Helm**: `v3.12+` (optional, for chart installation)
+- **Helm**: `v3.14+`
 
 ---
 
-### Quick Installation (using Kustomize)
+### Installation Options
+
+#### Option 1: 1-Line Release Install (Recommended)
+
+Deploy the latest official release (`v0.2.0`) including all CRDs, RBAC roles, manager deployment, and zero-trust network policies:
+
+```bash
+kubectl apply -f https://github.com/gitcommitankit/agentrax/releases/download/v0.2.0/install.yaml
+```
+
+#### Option 2: Installation via Helm (Configurable & Production)
+
+Add the official Agentrax Helm repository hosted on GitHub Pages:
+
+```bash
+# Add and update the repository
+helm repo add agentrax https://gitcommitankit.github.io/agentrax
+helm repo update
+
+# Install Agentrax
+helm install agentrax agentrax/agentrax \
+  --namespace agentrax-system \
+  --create-namespace \
+  --set prometheus.url="http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+```
+
+For cloud workload identity deployments (Azure AKS or AWS EKS), see [Cloud Workload Identity Guide](docs/cloud/workload-identity.md).
+
+#### Option 3: Automated Local Dev Stack via Terraform
+
+If developing locally on Kind, provision a 2-node cluster with `cert-manager`, `kube-prometheus-stack`, and `agentrax` in strict dependency order with a single command:
+
+```bash
+make terraform-apply
+```
+
+_(Tear down when finished via `make terraform-destroy`)_
+
+#### Option 4: Build & Deploy from Source (Kustomize)
 
 1. **Clone the repository:**
 
@@ -94,43 +135,23 @@ flowchart TB
    cd agentrax
    ```
 
-2. **Install cluster dependencies** (cert-manager, Prometheus Operator, Gateway API CRDs, and Prometheus Adapter):
+2. **Install cluster dependencies** (cert-manager, Prometheus Operator, Gateway API CRDs):
 
    ```bash
    make deploy-deps
    ```
 
-   Note: Prometheus Adapter installation instructions are printed by `make deploy-deps`. Follow the displayed guidance to complete the metrics pipeline setup.
-
-3. **Install Agentrax CRDs:**
+3. **Install Agentrax CRDs and Controller Manager:**
 
    ```bash
    make install
+   make deploy IMG=ghcr.io/gitcommitankit/agentrax:v0.2.0
    ```
 
-4. **Deploy the Agentrax Controller Manager:**
-
-   ```bash
-   make deploy IMG=ghcr.io/gitcommitankit/agentrax:latest
-   ```
-
-5. **Verify the operator is running:**
-
+4. **Verify the operator is running:**
    ```bash
    kubectl get pods -n agentrax-system
    ```
-
----
-
-### Installation via Helm
-
-```bash
-# Install the Helm chart
-helm install agentrax ./charts/agentrax \
-  --namespace agentrax-system \
-  --create-namespace \
-  --set prometheus.url="http://prometheus-operated.monitoring.svc:9090"
-```
 
 ---
 
@@ -257,12 +278,12 @@ The `ttl` field is expressed in nanoseconds (e.g., `90000000000` = 90 seconds).
 
 ### Endpoints
 
-| Method   | Path                         | Description                                                                                                                 |
-| -------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/agents`                    | List all active, non-expired registered agents.                                                                             |
-| `GET`    | `/agents/{namespace}/{name}` | Get details and discovered tool capabilities of a specific agent.                                                           |
+| Method   | Path                         | Description                                                                                                                   |
+| -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/agents`                    | List all active, non-expired registered agents.                                                                               |
+| `GET`    | `/agents/{namespace}/{name}` | Get details and discovered tool capabilities of a specific agent.                                                             |
 | `POST`   | `/agents`                    | Directly register or update an agent entry (bypasses MCP handshake; for administrative use or testing, not normal operation). |
-| `DELETE` | `/agents/{namespace}/{name}` | Deregister an agent from the registry store.                                                                                |
+| `DELETE` | `/agents/{namespace}/{name}` | Deregister an agent from the registry store.                                                                                  |
 
 ---
 
@@ -270,24 +291,41 @@ The `ttl` field is expressed in nanoseconds (e.g., `90000000000` = 90 seconds).
 
 ### Command-Line Arguments
 
-| Flag                          | Default            | Description                                                         |
-| ----------------------------- | ------------------ | ------------------------------------------------------------------- |
-| `--metrics-bind-address`      | `0`                | Metrics HTTP endpoint address (`:8443` or `:8080`, `0` to disable). |
-| `--health-probe-bind-address` | `:8081`            | Address for `/healthz` and `/readyz` probes.                        |
-| `--leader-elect`              | `false`            | Enable leader election for active-standby controller HA.            |
-| `--registry-bind-address`     | `:9090`            | Address for the embedded MCP discovery HTTP server.                 |
-| `--gpu-resource-name`         | `nvidia.com/gpu`   | Resource name used for GPU quota accounting.                        |
-| `--prometheus-url`            | `""`               | Prometheus API base URL for canary metric queries.                  |
-| `--gateway-name`              | `agentrax-gateway` | Gateway API object name for canary traffic splits.                  |
-| `--gateway-namespace`         | `agentrax-system`  | Gateway API object namespace.                                       |
+| Flag                          | Default            | Description                                                          |
+| ----------------------------- | ------------------ | -------------------------------------------------------------------- |
+| `--metrics-bind-address`      | `0`                | Metrics HTTP endpoint address (`:8443` or `:8080`, `0` to disable).  |
+| `--health-probe-bind-address` | `:8081`            | Address for `/healthz` and `/readyz` probes.                         |
+| `--leader-elect`              | `false`            | Enable leader election for active-standby controller HA.             |
+| `--registry-bind-address`     | `:9090`            | Address for the embedded MCP discovery HTTP server.                  |
+| `--gpu-resource-name`         | `nvidia.com/gpu`   | Resource name used for GPU quota accounting.                         |
+| `--prometheus-url`            | `""`               | Prometheus API base URL for canary metric queries.                   |
+| `--gateway-name`              | `agentrax-gateway` | Gateway API object name for canary traffic splits.                   |
+| `--gateway-namespace`         | `agentrax-system`  | Gateway API object namespace.                                        |
+| `--otlp-endpoint`             | `""`               | gRPC endpoint for OpenTelemetry trace exporter (e.g. `jaeger:4317`). |
+| `--otlp-insecure`             | `false`            | Use plaintext gRPC for local development tracing.                    |
+| `--log-level`                 | `info`             | Minimum structured log level (`debug`, `info`, `warn`, `error`).     |
 
 ### Environment Variables
 
-| Variable                       | Default | Description                                           |
-| ------------------------------ | ------- | ----------------------------------------------------- |
-| `ENABLE_WEBHOOKS`              | `true`  | Set to `false` to disable admission webhook servers.  |
-| `AGENTRAX_MCP_HEALTH_INTERVAL` | `30s`   | Frequency of background MCP initialize health probes. |
-| `AGENTRAX_REGISTRY_TTL`        | `90s`   | Expiration window for unrefreshed registry entries.   |
+| Variable                       | Default | Description                                                                |
+| ------------------------------ | ------- | -------------------------------------------------------------------------- |
+| `ENABLE_WEBHOOKS`              | auto    | Auto-enabled when TLS certs exist on disk. Set `false` to force-disable.   |
+| `AGENTRAX_MCP_HEALTH_INTERVAL` | `60s`   | Frequency of background MCP health probes (Helm chart overrides to `30s`). |
+| `AGENTRAX_REGISTRY_TTL`        | `90s`   | Expiration window for unrefreshed registry entries.                        |
+| `POD_NAMESPACE`                | `""`    | Controller namespace (used for the `agentrax-registry` store).             |
+
+---
+
+## Detailed Documentation
+
+- [System Architecture](docs/ARCHITECTURE.md) — Comprehensive technical architecture, reconciliation flows, and ADRs
+- [Zero-Trust Network Policies](docs/networking/README.md) — Packet-level firewalling and multi-tenant agent network isolation
+- [Cloud Workload Identity Guide](docs/cloud/workload-identity.md) — Keyless authentication on Azure AKS & AWS EKS
+- [Observability, Alerting & Tracing Guide](docs/observability/README.md) — Metrics, Prometheus alerting rules, Grafana, and Jaeger
+- [Helm Chart Reference](charts/agentrax/README.md) — Values schema, production installation, and parameters
+- [Terraform Infrastructure Guide](infra/README.md) — Local Kind cluster provisioning and cloud stack deployment
+- [Contributing Guide](CONTRIBUTING.md) — Prerequisites, development setup, and pull request workflow
+- [Security Policy](SECURITY.md) — Supported versions and vulnerability reporting
 
 ---
 
