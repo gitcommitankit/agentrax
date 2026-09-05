@@ -1099,7 +1099,7 @@ spec:
           value: 30s
         - name: AGENTRAX_REGISTRY_TTL
           value: 90s
-        image: ghcr.io/gitcommitankit/agentrax:v0.1.0
+        image: ghcr.io/gitcommitankit/agentrax:v0.2.0
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1139,3 +1139,72 @@ spec:
           type: RuntimeDefault
       serviceAccountName: agentrax-controller-manager
       terminationGracePeriodSeconds: 30
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-allow-metrics-traffic
+  namespace: agentrax-system
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          metrics: enabled
+    ports:
+    - port: 8443
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agentrax
+  name: agentrax-tenant-agent-isolation
+  namespace: agentrax-system
+spec:
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values:
+          - kube-dns
+          - coredns
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          monitoring: enabled
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      agentrax.io/agent: "true"
+  policyTypes:
+  - Ingress
+  - Egress

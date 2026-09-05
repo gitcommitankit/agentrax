@@ -35,7 +35,7 @@ const (
 )
 
 var _ = Describe("Agentrax Operator End-to-End Suite", Ordered, func() {
-	var projectimage = "example.com/agentrax:v0.1.0"
+	var projectimage = "example.com/agentrax:v0.2.0"
 
 	BeforeAll(func() {
 		By("installing cert-manager for webhook TLS")
