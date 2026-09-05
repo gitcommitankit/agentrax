@@ -68,7 +68,7 @@ Agentrax implements a **two-tier zero-trust network security model** enforced at
 The consolidated release installer (`dist/install.yaml`) automatically includes both NetworkPolicies under `agentrax-system`.
 
 ```bash
-kubectl apply -f https://github.com/gitcommitankit/agentrax/releases/download/v0.2.0/install.yaml
+kubectl apply -f https://github.com/gitcommitankit/agentrax/releases/download/v0.2.1/install.yaml
 ```
 
 ### Option B: Applying Tenant Isolation to Individual Tenant Namespaces

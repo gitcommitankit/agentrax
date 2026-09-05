@@ -1099,7 +1099,7 @@ spec:
           value: 30s
         - name: AGENTRAX_REGISTRY_TTL
           value: 90s
-        image: ghcr.io/gitcommitankit/agentrax:v0.2.0
+        image: ghcr.io/gitcommitankit/agentrax:v0.2.1
         livenessProbe:
           httpGet:
             path: /healthz

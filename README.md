@@ -92,10 +92,10 @@ flowchart TB
 
 #### Option 1: 1-Line Release Install (Recommended)
 
-Deploy the latest official release (`v0.2.0`) including all CRDs, RBAC roles, manager deployment, and zero-trust network policies:
+Deploy the latest official release (`v0.2.1`) including all CRDs, RBAC roles, manager deployment, and zero-trust network policies:
 
 ```bash
-kubectl apply -f https://github.com/gitcommitankit/agentrax/releases/download/v0.2.0/install.yaml
+kubectl apply -f https://github.com/gitcommitankit/agentrax/releases/download/v0.2.1/install.yaml
 ```
 
 #### Option 2: Installation via Helm (Configurable & Production)
@@ -145,7 +145,7 @@ _(Tear down when finished via `make terraform-destroy`)_
 
    ```bash
    make install
-   make deploy IMG=ghcr.io/gitcommitankit/agentrax:v0.2.0
+   make deploy IMG=ghcr.io/gitcommitankit/agentrax:v0.2.1
    ```
 
 4. **Verify the operator is running:**
